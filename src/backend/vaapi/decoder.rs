@@ -73,7 +73,6 @@ pub(crate) trait VaStreamInfo {
     /// Returns the VA profile of the stream.
     fn va_profile(&self) -> anyhow::Result<i32>;
     /// Returns the RT format of the stream.
-    #[allow(dead_code)]
     fn rt_format(&self) -> anyhow::Result<u32>;
     /// Returns the minimum number of surfaces required to decode the stream.
     fn min_num_surfaces(&self) -> usize;
@@ -199,6 +198,30 @@ pub struct VaapiBackend<V: VideoFrame> {
     _phantom_data: PhantomData<V>,
 }
 
+/// W-F1: maps a stream `RT_FORMAT` to the CPU-side [`DecodedFormat`] of the
+/// surfaces we export for zero-copy DMA output. Only the three formats that have
+/// output wiring are supported:
+/// - `YUV420`    → NV12  (8-bit 4:2:0)
+/// - `YUV420_10` → P010  (10-bit 4:2:0, [`DecodedFormat::I010`])
+/// - `YUV422_10` → Y210  (10-bit 4:2:2, [`DecodedFormat::I210`])
+///
+/// 12-bit (P012/Y212) and 4:4:4 (Y410/Y412) have no output wiring yet and are
+/// rejected with an explicit error, so profiles such as HEVC Main12/Main444 —
+/// which `va_profile()` now maps (W-F10) — still fail cleanly here instead of
+/// decoding into a wrong-layout surface.
+fn output_decoded_format(rt_format: u32) -> anyhow::Result<DecodedFormat> {
+    match rt_format {
+        libva::VA_RT_FORMAT_YUV420 => Ok(DecodedFormat::NV12),
+        libva::VA_RT_FORMAT_YUV420_10 => Ok(DecodedFormat::I010),
+        libva::VA_RT_FORMAT_YUV422_10 => Ok(DecodedFormat::I210),
+        other => Err(anyhow!(
+            "Unsupported decode output RT format {:#x}: only 8-bit 4:2:0 (NV12), \
+             10-bit 4:2:0 (P010) and 10-bit 4:2:2 (Y210) are wired for output",
+            other
+        )),
+    }
+}
+
 impl<V: VideoFrame> VaapiBackend<V> {
     // W-F2 (panics→Results, §6.5): the initial config/context creation returns a
     // `Result` instead of `.expect()`-panicking, so a driver that cannot create
@@ -249,14 +272,24 @@ impl<V: VideoFrame> VaapiBackend<V> {
         self.stream_info.coded_resolution = stream_params.coded_size().clone();
         self.stream_info.min_num_frames = stream_params.min_num_surfaces();
 
+        // W-F1: derive the RT format and the output `DecodedFormat` from the
+        // stream's bit depth and chroma subsampling instead of hardcoding 8-bit
+        // 4:2:0. Only the three formats with zero-copy DMA output wiring are
+        // accepted (see `output_decoded_format`); any other (12-bit, 4:4:4, …)
+        // is an explicit error rather than a silent mis-decode into a
+        // wrong-layout surface.
+        let rt_format = stream_params
+            .rt_format()
+            .map_err(|_| anyhow!("Could not get RT format from stream!"))?;
+        self.stream_info.format = output_decoded_format(rt_format)?;
+
         // TODO: Handle context re-use
-        // TODO: We should obtain RT_FORMAT from stream_info
         let config = self
             .display
             .create_config(
                 vec![libva::VAConfigAttrib {
                     type_: libva::VAConfigAttribType::VAConfigAttribRTFormat,
-                    value: libva::VA_RT_FORMAT_YUV420,
+                    value: rt_format,
                 }],
                 stream_params.va_profile().map_err(|_| anyhow!("Could not get VAProfile!"))?,
                 libva::VAEntrypoint::VAEntrypointVLD,

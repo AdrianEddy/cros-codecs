@@ -113,38 +113,75 @@ impl VaStreamInfo for &Sps {
             std::cmp::max(self.bit_depth_luma_minus8 + 8, self.bit_depth_chroma_minus8 + 8);
 
         let chroma_format_idc = self.chroma_format_idc;
-        let err = Err(anyhow!(
-            "Invalid combination of profile, bit depth an chroma_format_idc: ({:?}, {}, {}",
-            profile,
-            bit_depth,
-            chroma_format_idc
-        ));
 
-        // TODO: This can still be much improved in light of table A.2.
-        match profile {
-            Profile::Main | Profile::MainStill | Profile::Main10 => {
-                match (bit_depth, chroma_format_idc) {
-                    (8, 0) | (8, 1) => Ok(libva::VAProfile::VAProfileHEVCMain),
-                    (8, 3) => Ok(libva::VAProfile::VAProfileHEVCMain444),
-                    (10, 0) | (10, 1) => Ok(libva::VAProfile::VAProfileHEVCMain10),
-                    (10, 2) => Ok(libva::VAProfile::VAProfileHEVCMain422_10),
-                    (12, 1) => Ok(libva::VAProfile::VAProfileHEVCMain12),
-                    (12, 2) => Ok(libva::VAProfile::VAProfileHEVCMain422_12),
-                    (12, 3) => Ok(libva::VAProfile::VAProfileHEVCMain444_12),
-                    _ => err,
-                }
+        // W-F10(a): The Range Extensions / High Throughput profiles and the base
+        // Main family all select the VA profile purely by (bit depth,
+        // chroma_format_idc). A conformant e.g. Main 4:2:2 10 stream signals
+        // `general_profile_idc = 4` (RangeExtensions), which previously fell
+        // through to an `unimplemented!()` panic. This closure maps the format
+        // pair to the VA profile for both `general_profile_idc` and
+        // `general_profile_compatibility_flag`-matched streams (HEVC Annex A).
+        // Whether the mapped profile has zero-copy *output* wiring is enforced
+        // separately in `VaapiBackend::new_sequence` (W-F1) — 12-bit and 4:4:4
+        // profiles map here but are rejected with an explicit error there.
+        let map_main_family = |bit_depth: u8, chroma: u8| -> anyhow::Result<i32> {
+            match (bit_depth, chroma) {
+                (8, 0) | (8, 1) => Ok(libva::VAProfile::VAProfileHEVCMain),
+                (8, 3) => Ok(libva::VAProfile::VAProfileHEVCMain444),
+                (10, 0) | (10, 1) => Ok(libva::VAProfile::VAProfileHEVCMain10),
+                (10, 2) => Ok(libva::VAProfile::VAProfileHEVCMain422_10),
+                (10, 3) => Ok(libva::VAProfile::VAProfileHEVCMain444_10),
+                (12, 0) | (12, 1) => Ok(libva::VAProfile::VAProfileHEVCMain12),
+                (12, 2) => Ok(libva::VAProfile::VAProfileHEVCMain422_12),
+                (12, 3) => Ok(libva::VAProfile::VAProfileHEVCMain444_12),
+                _ => Err(anyhow!(
+                    "Unsupported HEVC bit depth / chroma_format_idc pair: ({}, {})",
+                    bit_depth,
+                    chroma
+                )),
             }
+        };
 
-            // See table A.4.
+        match profile {
+            Profile::Main
+            | Profile::MainStill
+            | Profile::Main10
+            | Profile::RangeExtensions
+            | Profile::HighThroughput => map_main_family(bit_depth, chroma_format_idc),
+
+            // See table A.4 (Annex H scalable extensions).
             Profile::ScalableMain => match (bit_depth, chroma_format_idc) {
                 (8, 1) => Ok(libva::VAProfile::VAProfileHEVCSccMain),
                 (8, 3) => Ok(libva::VAProfile::VAProfileHEVCSccMain444),
                 (10, 1) => Ok(libva::VAProfile::VAProfileHEVCSccMain10),
                 (10, 3) => Ok(libva::VAProfile::VAProfileHEVCSccMain444_10),
-                _ => err,
+                _ => Err(anyhow!(
+                    "Unsupported HEVC scalable bit depth / chroma_format_idc pair: ({}, {})",
+                    bit_depth,
+                    chroma_format_idc
+                )),
             },
 
-            _ => unimplemented!("Adding more profile support based on A.3. is still TODO"),
+            // Other profile_idc values (Multiview, 3D, Screen Content, scalable
+            // RExt, …) have no direct VA profile, but a conformant stream may
+            // still decode as a base profile via
+            // general_profile_compatibility_flag (HEVC Annex A). Fall back to the
+            // Main-family mapping when a Main / Main10 / MainStill / RExt / HT
+            // compatibility flag is set; otherwise return an explicit error —
+            // never the old `unimplemented!()` panic.
+            _ => {
+                let compat = &self.profile_tier_level.general_profile_compatibility_flag;
+                if compat[1] || compat[2] || compat[3] || compat[4] || compat[5] {
+                    map_main_family(bit_depth, chroma_format_idc)
+                } else {
+                    Err(anyhow!(
+                        "Unsupported HEVC profile {:?} (bit_depth={}, chroma_format_idc={})",
+                        profile,
+                        bit_depth,
+                        chroma_format_idc
+                    ))
+                }
+            }
         }
     }
 

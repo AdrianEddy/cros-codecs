@@ -493,6 +493,18 @@ impl VideoFrame for GenericDmaVideoFrame {
         self.layout.size.clone()
     }
 
+    // W-F1: the plane count must come from the actual FrameLayout, not from the
+    // fourcc→DecodedFormat guess used by the default trait impl. P010 (fourcc →
+    // DecodedFormat::I010) is a 2-plane semi-planar surface and Y210 (→ I210) is
+    // single-plane packed, whereas the default `num_planes()` would report 3 for
+    // the nominally-planar I010/I210 formats and corrupt both the PRIME_2 layer
+    // descriptor and the per-plane size math (`get_single_plane_size` would index
+    // past `layout.planes`). This is behaviour-preserving for NV12/I420/etc.,
+    // whose layout plane count already matches.
+    fn num_planes(&self) -> usize {
+        self.layout.planes.len()
+    }
+
     fn get_plane_size(&self) -> Vec<usize> {
         (0..self.num_planes()).map(|idx| self.get_single_plane_size(idx)).collect()
     }
@@ -539,9 +551,15 @@ impl VideoFrame for GenericDmaVideoFrame {
             );
         }
 
-        // TODO: Add more supported formats
+        // W-F1: 10-bit decode output. P010 is a 2-plane semi-planar surface (like
+        // NV12 but 16bpc) and Y210 is a single-plane packed 4:2:2-10 surface; both
+        // are imported via PRIME_2 with the fourcc taken from `self.layout` below.
+        // 12-bit (P012/Y212) and 4:4:4 (Y410/Y412) have no output wiring yet and
+        // stay an explicit error.
         let rt_format = match self.decoded_format().unwrap() {
             DecodedFormat::I420 | DecodedFormat::NV12 => libva::VA_RT_FORMAT_YUV420,
+            DecodedFormat::I010 => libva::VA_RT_FORMAT_YUV420_10,
+            DecodedFormat::I210 => libva::VA_RT_FORMAT_YUV422_10,
             _ => return Err("Format unsupported for VA-API export".to_string()),
         };
 

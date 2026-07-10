@@ -70,13 +70,34 @@ impl VaStreamInfo for &Rc<Sps> {
                 }
             }
             Profile::High | Profile::High422P | Profile::High10 => {
-                Ok(libva::VAProfile::VAProfileH264High)
+                // W-F10(b): High10 and High 4:2:2 have their own VA profiles
+                // (VAProfileH264High10 / VAProfileH264High422), but this backend
+                // only maps to VAProfileH264High. Decoding a >8-bit or non-4:2:0
+                // stream as 8-bit 4:2:0 High is a silent wrong-output bug, so
+                // reject it explicitly instead. Only 8-bit 4:2:0 High is
+                // supported.
+                let bit_depth =
+                    std::cmp::max(self.bit_depth_luma_minus8, self.bit_depth_chroma_minus8) + 8;
+                if bit_depth > 8 || self.chroma_format_idc != 1 {
+                    Err(anyhow!(
+                        "Unsupported H.264 stream: High10 / High 4:2:2 decode \
+                         (bit_depth={}, chroma_format_idc={}) is not supported",
+                        bit_depth,
+                        self.chroma_format_idc
+                    ))
+                } else {
+                    Ok(libva::VAProfile::VAProfileH264High)
+                }
             }
         }
     }
 
     fn rt_format(&self) -> anyhow::Result<u32> {
-        let bit_depth_luma = self.bit_depth_chroma_minus8 + 8;
+        // Derive from the luma bit depth (not chroma — the pre-W-F1 code read
+        // the wrong field; masked while only 8-bit 4:2:0 reached here, but a
+        // latent wrong-output bug now that rt_format() is live). Use the max so
+        // the RT format is never under-provisioned if the two ever differ.
+        let bit_depth_luma = self.bit_depth_luma_minus8.max(self.bit_depth_chroma_minus8) + 8;
         let chroma_format_idc = self.chroma_format_idc;
 
         match (bit_depth_luma, chroma_format_idc) {

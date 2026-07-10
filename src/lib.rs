@@ -251,6 +251,11 @@ impl From<Fourcc> for DecodedFormat {
             "I420" => DecodedFormat::I420,
             "NV12" | "NM12" => DecodedFormat::NV12,
             "MM21" => DecodedFormat::MM21,
+            // W-F1: 10-bit decode-output surfaces. P010 (2-plane 4:2:0-10) and
+            // Y210 (packed 4:2:2-10) map to the I010 / I210 CPU-readback formats,
+            // matching FORMAT_MAP in backend/vaapi.rs.
+            "P010" => DecodedFormat::I010,
+            "Y210" => DecodedFormat::I210,
             _ => todo!("Fourcc {} not yet supported", fourcc),
         }
     }
@@ -262,6 +267,9 @@ impl From<DecodedFormat> for Fourcc {
             DecodedFormat::I420 => Fourcc::from(b"I420"),
             DecodedFormat::NV12 => Fourcc::from(b"NV12"),
             DecodedFormat::MM21 => Fourcc::from(b"MM21"),
+            // W-F1: 10-bit decode-output surfaces (see FORMAT_MAP).
+            DecodedFormat::I010 => Fourcc::from(b"P010"),
+            DecodedFormat::I210 => Fourcc::from(b"Y210"),
             _ => todo!(),
         }
     }
@@ -427,9 +435,25 @@ pub enum BlockingMode {
 
 #[cfg(test)]
 mod tests {
+    use super::DecodedFormat;
     use super::Fourcc;
 
     const NV12_FOURCC: u32 = 0x3231564E;
+
+    // W-F1: the 10-bit decode-output surfaces round-trip between their VA fourcc
+    // and the DecodedFormat that FORMAT_MAP (backend/vaapi.rs) pairs them with.
+    #[test]
+    fn decoded_format_10bit_fourcc_roundtrip() {
+        // 10-bit 4:2:0 (P010) <-> I010
+        assert_eq!(DecodedFormat::from(Fourcc::from(b"P010")), DecodedFormat::I010);
+        assert_eq!(Fourcc::from(DecodedFormat::I010), Fourcc::from(b"P010"));
+        // 10-bit 4:2:2 (Y210) <-> I210
+        assert_eq!(DecodedFormat::from(Fourcc::from(b"Y210")), DecodedFormat::I210);
+        assert_eq!(Fourcc::from(DecodedFormat::I210), Fourcc::from(b"Y210"));
+        // 8-bit 4:2:0 (NV12) still maps as before.
+        assert_eq!(DecodedFormat::from(Fourcc::from(b"NV12")), DecodedFormat::NV12);
+        assert_eq!(Fourcc::from(DecodedFormat::NV12), Fourcc::from(b"NV12"));
+    }
 
     #[test]
     fn fourcc_u32() {
