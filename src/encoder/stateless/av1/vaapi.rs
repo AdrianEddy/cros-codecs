@@ -27,6 +27,7 @@ use libva::VAProfile::VAProfileAV1Profile1;
 use libva::VaError;
 use libva::VA_INVALID_ID;
 
+use crate::backend::vaapi::encoder::tunings_to_libva_rc;
 use crate::backend::vaapi::encoder::CodedOutputPromise;
 use crate::backend::vaapi::encoder::Reconstructed;
 use crate::backend::vaapi::encoder::VaapiBackend;
@@ -49,7 +50,6 @@ use crate::encoder::stateless::StatelessBackendError;
 use crate::encoder::stateless::StatelessBackendResult;
 use crate::encoder::stateless::StatelessEncoder;
 use crate::encoder::stateless::StatelessVideoEncoderBackend;
-use crate::encoder::EncodeError;
 use crate::encoder::EncodeResult;
 use crate::encoder::RateControl;
 use crate::video_frame::VideoFrame;
@@ -108,8 +108,9 @@ where
         let seq_tier = request.sequence.operating_points[OPERATING_POINT].seq_tier;
         let hierarchical_flag = 0;
 
-        // TODO: Enable bitrate control
-        let bits_per_second = 0;
+        // CBR bitrate target for the sequence header (0 ⇒ the driver ignores
+        // it, e.g. under CQP). Mirrors the VP9/H.264 encoders (W-F4).
+        let bits_per_second = request.tunings.rate_control.bitrate_target().unwrap_or(0) as u32;
 
         // AV1 5.5.2
         let bit_depth_minus8 = if request.sequence.seq_profile == Profile::Profile2
@@ -509,6 +510,19 @@ where
         let tg_param =
             libva::BufferType::EncSliceParameter(libva::EncSliceParameter::AV1(tg_param));
 
+        // Rate-control + framerate misc params (W-F4). Required for CBR (they
+        // carry the bitrate target + QP clamps and let the driver's rate
+        // controller size per-frame budgets); benign under CQP (bits_per_second
+        // is 0 and the driver drives QP from the picture param's base_q_idx) —
+        // exactly how the VP9/H.264 encoders submit them unconditionally.
+        let rc_param =
+            tunings_to_libva_rc::<{ MIN_BASE_QINDEX }, { MAX_BASE_QINDEX }>(&request.tunings)?;
+        let rc_param =
+            libva::BufferType::EncMiscParameter(libva::EncMiscParameter::RateControl(rc_param));
+        let framerate_param = libva::BufferType::EncMiscParameter(libva::EncMiscParameter::FrameRate(
+            libva::EncMiscParameterFrameRate::new(request.tunings.framerate, 0),
+        ));
+
         let mut references = Vec::new();
 
         for ref_frame in &request.references {
@@ -525,6 +539,8 @@ where
         picture.add_buffer(self.context().create_buffer(seq_param)?);
         picture.add_buffer(self.context().create_buffer(pic_param)?);
         picture.add_buffer(self.context().create_buffer(tg_param)?);
+        picture.add_buffer(self.context().create_buffer(rc_param)?);
+        picture.add_buffer(self.context().create_buffer(framerate_param)?);
 
         // Start processing the picture encoding
         let picture = picture.begin().map_err(BackendError::BeginPictureError)?;
@@ -559,16 +575,22 @@ impl<V: VideoFrame>
             _ => return Err(StatelessBackendError::UnsupportedProfile.into()),
         };
 
-        if !matches!(config.initial_tunings.rate_control, RateControl::ConstantQuality(_)) {
-            return Err(EncodeError::Unsupported);
-        }
+        // Rate-control mode → libva RC. CQP has always worked; CBR is added
+        // (W-F4) — the drivers support it, only this ctor gated it out by
+        // returning `Unsupported` and hardcoding `VA_RC_CQP`. Mirrors the VP9
+        // and H.264 encoder ctors in this crate. The per-frame RC + framerate
+        // misc params are submitted in `encode_tile_group`.
+        let bitrate_control = match config.initial_tunings.rate_control {
+            RateControl::ConstantBitrate(_) => libva::VA_RC_CBR,
+            RateControl::ConstantQuality(_) => libva::VA_RC_CQP,
+        };
 
         let backend = VaapiBackend::new(
             display,
             va_profile,
             fourcc,
             coded_size,
-            libva::VA_RC_CQP,
+            bitrate_control,
             low_power,
         )?;
 
