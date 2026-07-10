@@ -87,6 +87,27 @@ pub trait DecodedHandle {
 
     fn video_frame(&self) -> Arc<Self::Frame>;
 
+    /// Returns the frame to present for display.
+    ///
+    /// This is the frame the client should output. For most streams and backends
+    /// it is the same frame as [`Self::video_frame`] — the decoded reconstruction
+    /// that also serves as a DPB reference — and the default returns exactly that.
+    ///
+    /// It differs only when the displayed output must be distinct from the frame
+    /// retained as a reference. The motivating case is AV1 film-grain synthesis:
+    /// grain is applied outside the coding loop, so references must stay
+    /// grain-free while the presented frame carries the grain. A backend that
+    /// decodes such frames into two surfaces (grain-free reconstruct for the DPB,
+    /// grain-applied output for display) overrides this to return the display
+    /// frame; [`Self::video_frame`] keeps returning the reconstruct that
+    /// references point at. The same output≠reference split is required by other
+    /// decode APIs (e.g. Vulkan Video DISTINCT-mode and D3D12 reference-only
+    /// allocations), so the seam lives on the shared trait rather than in any one
+    /// backend.
+    fn display_frame(&self) -> Arc<Self::Frame> {
+        self.video_frame()
+    }
+
     /// Returns the timestamp of the picture.
     fn timestamp(&self) -> u64;
 
@@ -112,6 +133,14 @@ where
 
     fn video_frame(&self) -> Arc<Self::Frame> {
         self.as_ref().video_frame()
+    }
+
+    fn display_frame(&self) -> Arc<Self::Frame> {
+        // Forward to the inner handle's override (not the trait default, which
+        // would re-route to `video_frame()` and silently drop an output≠DPB
+        // split, e.g. AV1 film grain) so the seam survives `DynDecodedHandle`
+        // boxing (`into_trait_object`).
+        self.as_ref().display_frame()
     }
 
     fn timestamp(&self) -> u64 {

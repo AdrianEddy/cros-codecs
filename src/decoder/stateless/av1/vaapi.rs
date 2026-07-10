@@ -38,7 +38,14 @@ use crate::Rect;
 use crate::Resolution;
 
 /// The number of surfaces to allocate for this codec.
-const NUM_SURFACES: usize = 16;
+///
+/// AV1 keeps up to `NUM_REF_FRAMES` (8) DPB references plus in-flight decode and
+/// client-held output surfaces. The extra +2 over the base covers the in-flight
+/// grain-applied display surfaces (W-F9): a film-grain frame allocates a second
+/// surface for its display output while the grain-free reconstruct stays in the
+/// DPB. Only in-flight grain frames need the headroom — DPB references are always
+/// grain-free reconstructs, so this is +2, not 2×.
+const NUM_SURFACES: usize = 18;
 
 impl VaStreamInfo for &StreamInfo {
     fn va_profile(&self) -> anyhow::Result<i32> {
@@ -105,10 +112,6 @@ impl VaStreamInfo for &StreamInfo {
 impl From<&FrameHeaderObu> for libva::AV1FilmGrain {
     fn from(hdr: &FrameHeaderObu) -> Self {
         let fg = &hdr.film_grain_params;
-
-        if fg.apply_grain {
-            log::warn!("Film grain is not officially supported yet.")
-        }
 
         let film_grain_fields = libva::AV1FilmGrainFields::new(
             u32::from(fg.apply_grain),
@@ -238,6 +241,7 @@ fn build_pic_param<V: VideoFrame>(
     hdr: &FrameHeaderObu,
     stream_info: &StreamInfo,
     current_frame: libva::VASurfaceID,
+    current_display_picture: libva::VASurfaceID,
     reference_frames: &[Option<VADecodedHandle<V>>; NUM_REF_FRAMES],
 ) -> anyhow::Result<libva::BufferType> {
     let seq = stream_info.seq_header.clone();
@@ -413,9 +417,9 @@ fn build_pic_param<V: VideoFrame>(
         u8::try_from(seq.color_config.matrix_coefficients as u32)
             .context("Invalid matrix_coefficients")?,
         &seq_info_fields,
-        current_frame,
-        libva::VA_INVALID_SURFACE, /* film grain is unsupported for now */
-        vec![],                    /* anchor_frames_list */
+        current_frame,           /* grain-free reconstruct (DPB-referenced) */
+        current_display_picture, /* grain-applied display output, or VA_INVALID_SURFACE (W-F9) */
+        vec![],                  /* anchor_frames_list */
         u16::try_from(hdr.upscaled_width - 1).context("Invalid frame width")?,
         u16::try_from(hdr.frame_height - 1).context("Invalid frame height")?,
         0, /* output_frame_width_in_tiles_minus_1 */
@@ -498,15 +502,28 @@ impl<V: VideoFrame> StatelessAV1DecoderBackend for VaapiBackend<V> {
 
     fn new_picture(
         &mut self,
-        _hdr: &FrameHeaderObu,
+        hdr: &FrameHeaderObu,
         timestamp: u64,
         alloc_cb: &mut dyn FnMut() -> Option<V>,
     ) -> NewPictureResult<Self::Picture> {
-        Ok(VaapiPicture::new(
-            timestamp,
-            Rc::clone(&self.context),
-            alloc_cb().ok_or(NewPictureError::OutOfOutputBuffers)?,
-        )?)
+        // The reconstruct (grain-free) frame is always allocated; it is the
+        // decode render target and the DPB reference.
+        let reconstruct = alloc_cb().ok_or(NewPictureError::OutOfOutputBuffers)?;
+        if hdr.film_grain_params.apply_grain {
+            // W-F9: film grain is applied outside the coding loop, so the display
+            // output must differ from the grain-free reconstruct kept as a
+            // reference. Allocate a second surface from the same caller pool for
+            // the grain-applied display output (`current_display_picture`).
+            let display = alloc_cb().ok_or(NewPictureError::OutOfOutputBuffers)?;
+            Ok(VaapiPicture::new_with_display(
+                timestamp,
+                Rc::clone(&self.context),
+                reconstruct,
+                display,
+            )?)
+        } else {
+            Ok(VaapiPicture::new(timestamp, Rc::clone(&self.context), reconstruct)?)
+        }
     }
 
     fn begin_picture(
@@ -516,8 +533,17 @@ impl<V: VideoFrame> StatelessAV1DecoderBackend for VaapiBackend<V> {
         hdr: &FrameHeaderObu,
         reference_frames: &[Option<Self::Handle>; NUM_REF_FRAMES],
     ) -> StatelessBackendResult<()> {
-        let pic_param = build_pic_param(hdr, stream_info, picture.surface().id(), reference_frames)
-            .context("Failed to build picture parameter")?;
+        // `current_frame` = the grain-free reconstruct (this picture's render
+        // target, a DPB reference); `current_display_picture` = the grain-applied
+        // display surface when film grain applies, else VA_INVALID_SURFACE (W-F9).
+        let pic_param = build_pic_param(
+            hdr,
+            stream_info,
+            picture.surface().id(),
+            picture.display_surface_id(),
+            reference_frames,
+        )
+        .context("Failed to build picture parameter")?;
         let pic_param = self
             .context
             .create_buffer(pic_param)

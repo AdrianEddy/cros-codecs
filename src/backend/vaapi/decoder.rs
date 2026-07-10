@@ -45,6 +45,18 @@ impl<V: VideoFrame> DecodedHandleTrait for DecodedHandle<V> {
         self.borrow().backing_frame.clone()
     }
 
+    /// The grain-applied display frame when this handle carries one (AV1 film
+    /// grain, [`VaapiDisplayTarget`]), otherwise the reconstruct — which is what
+    /// [`Self::video_frame`] (and thus the DPB references) return. Overrides the
+    /// trait default so output ≠ DPB reference for grain frames.
+    fn display_frame(&self) -> Arc<Self::Frame> {
+        let handle = self.borrow();
+        match &handle.display {
+            Some(display) => display.frame.clone(),
+            None => handle.backing_frame.clone(),
+        }
+    }
+
     fn coded_resolution(&self) -> Resolution {
         self.borrow().surface().size().into()
     }
@@ -143,6 +155,23 @@ impl<M: SurfaceMemoryDescriptor> PictureState<M> {
     }
 }
 
+/// The grain-applied display target of an AV1 film-grain frame (W-F9).
+///
+/// AV1 film grain is applied outside the coding loop, so the frame kept as a DPB
+/// reference must stay grain-free while the presented frame carries the grain.
+/// When a picture applies grain, the decode renders the grain-free reconstruct
+/// into the [`VaapiPicture`]/[`VaapiDecodedHandle`] `backing_frame` surface (the
+/// DPB reference) and the driver writes the grain-applied output into this
+/// separate surface (`current_display_picture` in the AV1 picture parameter).
+/// Both come from the same caller pool (a second `alloc_cb`). `frame` is what
+/// [`DecodedHandle::display_frame`](DecodedHandleTrait::display_frame) returns;
+/// `surface` is synced alongside the reconstruct. `None` for every non-grain
+/// frame (all other codecs, and grain-free AV1 frames — output == reconstruct).
+struct VaapiDisplayTarget<V: VideoFrame> {
+    frame: Arc<V>,
+    surface: Surface<<V as VideoFrame>::MemDescriptor>,
+}
+
 /// VA-API backend handle.
 ///
 /// This includes the VA picture which can be pending rendering or complete, as well as useful
@@ -152,22 +181,34 @@ pub struct VaapiDecodedHandle<V: VideoFrame> {
     state: PictureState<<V as VideoFrame>::MemDescriptor>,
     /// Actual resolution of the visible rectangle in the decoded buffer.
     display_resolution: Resolution,
+    /// The grain-applied display target when this handle applies AV1 film grain
+    /// (W-F9); `None` when output == reconstruct (the common case).
+    display: Option<VaapiDisplayTarget<V>>,
 }
 
 impl<V: VideoFrame> VaapiDecodedHandle<V> {
     /// Creates a new pending handle on `surface_id`.
     fn new(picture: VaapiPicture<V>, display_resolution: Resolution) -> anyhow::Result<Self> {
         let backing_frame = picture.backing_frame;
+        let display = picture.display;
         let picture = picture.picture.begin()?.render()?.end()?;
         Ok(Self {
             backing_frame: backing_frame,
             state: PictureState::Pending(picture),
             display_resolution: display_resolution,
+            display,
         })
     }
 
     fn sync(&mut self) -> Result<(), VaError> {
-        self.state.sync()
+        self.state.sync()?;
+        // W-F9: the grain-applied display surface is written by the same decode
+        // operation but is a distinct surface, so it must be synced too before
+        // the display frame is read/exported.
+        if let Some(display) = &self.display {
+            display.surface.sync()?;
+        }
+        Ok(())
     }
 
     /// Creates a new picture from the surface backing the current one. Useful for interlaced
@@ -176,6 +217,7 @@ impl<V: VideoFrame> VaapiDecodedHandle<V> {
         VaapiPicture {
             picture: self.state.new_from_same_surface(timestamp),
             backing_frame: self.backing_frame.clone(),
+            display: None,
         }
     }
 
@@ -329,6 +371,9 @@ impl<V: VideoFrame> VaapiBackend<V> {
 pub struct VaapiPicture<V: VideoFrame> {
     picture: Picture<PictureNew, Surface<V::MemDescriptor>>,
     backing_frame: Arc<V>,
+    /// The grain-applied display target for AV1 film grain (W-F9); `None` when
+    /// output == reconstruct. Threaded onto the [`VaapiDecodedHandle`] at submit.
+    display: Option<VaapiDisplayTarget<V>>,
 }
 
 impl<V: VideoFrame> VaapiPicture<V> {
@@ -342,11 +387,44 @@ impl<V: VideoFrame> VaapiPicture<V> {
         Ok(Self {
             backing_frame: Arc::new(backing_frame),
             picture: Picture::new(timestamp, context, surface),
+            display: None,
+        })
+    }
+
+    /// Creates a picture with a distinct grain-applied display target (AV1 film
+    /// grain, W-F9). The decode renders the grain-free reconstruct into
+    /// `backing_frame`'s surface (the DPB reference / `current_frame`), and the
+    /// driver writes the grain-applied output into `display_frame`'s surface
+    /// (`current_display_picture`). Both frames come from the same caller pool.
+    pub fn new_with_display(
+        timestamp: u64,
+        context: Rc<Context>,
+        backing_frame: V,
+        display_frame: V,
+    ) -> anyhow::Result<Self> {
+        let display = context.display();
+        let surface = backing_frame.to_native_handle(display).map_err(|e| anyhow!(e))?.into();
+        let display_surface = display_frame.to_native_handle(display).map_err(|e| anyhow!(e))?.into();
+        Ok(Self {
+            backing_frame: Arc::new(backing_frame),
+            picture: Picture::new(timestamp, context, surface),
+            display: Some(VaapiDisplayTarget {
+                frame: Arc::new(display_frame),
+                surface: display_surface,
+            }),
         })
     }
 
     pub fn surface(&self) -> &Surface<V::MemDescriptor> {
         self.picture.surface()
+    }
+
+    /// The VA surface id of the grain-applied display target (W-F9), or
+    /// [`libva::VA_INVALID_SURFACE`] when there is none — the value the AV1
+    /// picture parameter's `current_display_picture` field expects (grain-free
+    /// frames leave it invalid so the driver applies no grain).
+    pub fn display_surface_id(&self) -> libva::VASurfaceID {
+        self.display.as_ref().map_or(libva::VA_INVALID_SURFACE, |d| d.surface.id())
     }
 
     pub fn add_buffer(&mut self, buffer: Buffer) {
