@@ -656,15 +656,17 @@ pub(super) mod tests {
             ],
         };
 
-        let mut encoder = VaapiH264Encoder::new_vaapi(
+        let backend = VaapiBackend::<(), PooledVaSurface<()>>::new(
             Rc::clone(&display),
-            config,
+            VAProfileH264Main,
             frame_layout.format.0,
             frame_layout.size,
+            libva::VA_RC_CBR,
             low_power,
-            BlockingMode::Blocking,
         )
         .unwrap();
+        let mut encoder =
+            VaapiH264Encoder::new_h264(backend, config, BlockingMode::Blocking).unwrap();
 
         let mut pool = VaSurfacePool::new(
             Rc::clone(&display),

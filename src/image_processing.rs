@@ -524,10 +524,17 @@ mod tests {
         let (test_u_output, test_v_output) = test_uv_output.split_at_mut(480 * 288 / 4);
         nv12_to_i420(
             &test_input[0..480 * 288],
+            480,
             test_y_output,
+            480,
             &test_input[480 * 288..480 * 288 * 3 / 2],
+            480,
             test_u_output,
+            240,
             test_v_output,
+            240,
+            480,
+            288,
         );
         assert_eq!(test_output, *test_expected_output);
     }

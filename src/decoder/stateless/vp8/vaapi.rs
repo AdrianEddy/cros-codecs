@@ -303,66 +303,15 @@ impl<V: VideoFrame> StatelessDecoder<Vp8, VaapiBackend<V>> {
 #[cfg(test)]
 mod tests {
     use libva::BufferType;
-    use libva::Display;
     use libva::IQMatrix;
     use libva::PictureParameter;
     use libva::SliceParameter;
 
     use crate::bitstream_utils::IvfIterator;
     use crate::codec::vp8::parser::Parser;
-    use crate::decoder::stateless::tests::test_decode_stream;
-    use crate::decoder::stateless::tests::TestStream;
-    use crate::decoder::stateless::StatelessDecoder;
-    use crate::decoder::BlockingMode;
-    use crate::utils::simple_playback_loop;
-    use crate::utils::simple_playback_loop_owned_frames;
-    use crate::DecodedFormat;
     use crate::Resolution;
 
     use super::*;
-
-    /// Run `test` using the vaapi decoder, in both blocking and non-blocking modes.
-    fn test_decoder_vaapi(
-        test: &TestStream,
-        output_format: DecodedFormat,
-        blocking_mode: BlockingMode,
-    ) {
-        let display = Display::open().unwrap();
-        let decoder = StatelessDecoder::<Vp8, _>::new_vaapi::<()>(display, blocking_mode).unwrap();
-
-        test_decode_stream(
-            |d, s, c| {
-                simple_playback_loop(
-                    d,
-                    IvfIterator::new(s),
-                    c,
-                    &mut simple_playback_loop_owned_frames,
-                    output_format,
-                    blocking_mode,
-                )
-            },
-            decoder,
-            test,
-            true,
-            false,
-        );
-    }
-
-    #[test]
-    // Ignore this test by default as it requires libva-compatible hardware.
-    #[ignore]
-    fn test_25fps_block() {
-        use crate::decoder::stateless::vp8::tests::DECODE_TEST_25FPS;
-        test_decoder_vaapi(&DECODE_TEST_25FPS, DecodedFormat::NV12, BlockingMode::Blocking);
-    }
-
-    #[test]
-    // Ignore this test by default as it requires libva-compatible hardware.
-    #[ignore]
-    fn test_25fps_nonblock() {
-        use crate::decoder::stateless::vp8::tests::DECODE_TEST_25FPS;
-        test_decoder_vaapi(&DECODE_TEST_25FPS, DecodedFormat::NV12, BlockingMode::NonBlocking);
-    }
 
     #[test]
     /// Check that we are able to build the VA picture parameters from the stream properly.

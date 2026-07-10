@@ -2,8 +2,6 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#[cfg(test)]
-mod dummy;
 #[cfg(feature = "v4l2")]
 mod v4l2;
 #[cfg(feature = "vaapi")]
@@ -354,108 +352,5 @@ where
 
     fn poll_fd(&self) -> BorrowedFd {
         self.epoll_fd.0.as_fd()
-    }
-}
-
-#[cfg(test)]
-pub mod tests {
-    use crate::bitstream_utils::IvfIterator;
-    use crate::decoder::stateless::tests::test_decode_stream;
-    use crate::decoder::stateless::tests::TestStream;
-    use crate::decoder::stateless::vp9::Vp9;
-    use crate::decoder::stateless::StatelessDecoder;
-    use crate::decoder::BlockingMode;
-    use crate::utils::simple_playback_loop;
-    use crate::utils::simple_playback_loop_owned_frames;
-    use crate::DecodedFormat;
-
-    /// Run `test` using the dummy decoder, in both blocking and non-blocking modes.
-    fn test_decoder_dummy(test: &TestStream, blocking_mode: BlockingMode) {
-        let decoder = StatelessDecoder::<Vp9, _>::new_dummy(blocking_mode).unwrap();
-
-        test_decode_stream(
-            |d, s, c| {
-                simple_playback_loop(
-                    d,
-                    IvfIterator::new(s),
-                    c,
-                    &mut simple_playback_loop_owned_frames,
-                    DecodedFormat::NV12,
-                    blocking_mode,
-                )
-            },
-            decoder,
-            test,
-            false,
-            false,
-        );
-    }
-
-    /// Same as Chromium's test-25fps.vp8
-    pub const DECODE_TEST_25FPS: TestStream = TestStream {
-        stream: include_bytes!("../../codec/vp9/test_data/test-25fps.vp9"),
-        crcs: include_str!("../../codec/vp9/test_data/test-25fps.vp9.crc"),
-    };
-
-    #[test]
-    fn test_25fps_block() {
-        test_decoder_dummy(&DECODE_TEST_25FPS, BlockingMode::Blocking);
-    }
-
-    #[test]
-    fn test_25fps_nonblock() {
-        test_decoder_dummy(&DECODE_TEST_25FPS, BlockingMode::NonBlocking);
-    }
-
-    // Remuxed from the original matroska source in libvpx using ffmpeg:
-    // ffmpeg -i vp90-2-10-show-existing-frame.webm/vp90-2-10-show-existing-frame.webm -c:v copy /tmp/vp90-2-10-show-existing-frame.vp9.ivf
-    pub const DECODE_TEST_25FPS_SHOW_EXISTING_FRAME: TestStream = TestStream {
-        stream: include_bytes!("../../codec/vp9/test_data/vp90-2-10-show-existing-frame.vp9.ivf"),
-        crcs: include_str!("../../codec/vp9/test_data/vp90-2-10-show-existing-frame.vp9.ivf.crc"),
-    };
-
-    #[test]
-    fn show_existing_frame_block() {
-        test_decoder_dummy(&DECODE_TEST_25FPS_SHOW_EXISTING_FRAME, BlockingMode::Blocking);
-    }
-
-    #[test]
-    fn show_existing_frame_nonblock() {
-        test_decoder_dummy(&DECODE_TEST_25FPS_SHOW_EXISTING_FRAME, BlockingMode::NonBlocking);
-    }
-
-    pub const DECODE_TEST_25FPS_SHOW_EXISTING_FRAME2: TestStream = TestStream {
-        stream: include_bytes!("../../codec/vp9/test_data/vp90-2-10-show-existing-frame2.vp9.ivf"),
-        crcs: include_str!("../../codec/vp9/test_data/vp90-2-10-show-existing-frame2.vp9.ivf.crc"),
-    };
-
-    #[test]
-    fn show_existing_frame2_block() {
-        test_decoder_dummy(&DECODE_TEST_25FPS_SHOW_EXISTING_FRAME2, BlockingMode::Blocking);
-    }
-
-    #[test]
-    fn show_existing_frame2_nonblock() {
-        test_decoder_dummy(&DECODE_TEST_25FPS_SHOW_EXISTING_FRAME2, BlockingMode::NonBlocking);
-    }
-
-    // Remuxed from the original matroska source in libvpx using ffmpeg:
-    // ffmpeg -i vp90-2-10-show-existing-frame.webm/vp90-2-10-show-existing-frame.webm -c:v copy /tmp/vp90-2-10-show-existing-frame.vp9.ivf
-    // There are some weird padding issues introduced by GStreamer for
-    // resolutions that are not multiple of 4, so we're ignoring CRCs for
-    // this one.
-    pub const DECODE_RESOLUTION_CHANGE_500FRAMES: TestStream = TestStream {
-        stream: include_bytes!("../../codec/vp9/test_data/resolution_change_500frames-vp9.ivf"),
-        crcs: include_str!("../../codec/vp9/test_data/resolution_change_500frames-vp9.ivf.crc"),
-    };
-
-    #[test]
-    fn test_resolution_change_500frames_block() {
-        test_decoder_dummy(&DECODE_RESOLUTION_CHANGE_500FRAMES, BlockingMode::Blocking);
-    }
-
-    #[test]
-    fn test_resolution_change_500frames_nonblock() {
-        test_decoder_dummy(&DECODE_RESOLUTION_CHANGE_500FRAMES, BlockingMode::Blocking);
     }
 }

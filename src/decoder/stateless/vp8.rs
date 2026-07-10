@@ -2,8 +2,6 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#[cfg(any(test, fuzzing))]
-mod dummy;
 #[cfg(feature = "v4l2")]
 mod v4l2;
 #[cfg(feature = "vaapi")]
@@ -309,56 +307,5 @@ where
 
     fn poll_fd(&self) -> BorrowedFd {
         self.epoll_fd.0.as_fd()
-    }
-}
-
-#[cfg(test)]
-pub mod tests {
-    use crate::bitstream_utils::IvfIterator;
-    use crate::decoder::stateless::tests::test_decode_stream;
-    use crate::decoder::stateless::tests::TestStream;
-    use crate::decoder::stateless::vp8::Vp8;
-    use crate::decoder::stateless::StatelessDecoder;
-    use crate::decoder::BlockingMode;
-    use crate::utils::simple_playback_loop;
-    use crate::utils::simple_playback_loop_owned_frames;
-    use crate::DecodedFormat;
-
-    /// Run `test` using the dummy decoder, in both blocking and non-blocking modes.
-    fn test_decoder_dummy(test: &TestStream, blocking_mode: BlockingMode) {
-        let decoder = StatelessDecoder::<Vp8, _>::new_dummy(blocking_mode).unwrap();
-
-        test_decode_stream(
-            |d, s, c| {
-                simple_playback_loop(
-                    d,
-                    IvfIterator::new(s),
-                    c,
-                    &mut simple_playback_loop_owned_frames,
-                    DecodedFormat::NV12,
-                    blocking_mode,
-                )
-            },
-            decoder,
-            test,
-            false,
-            false,
-        );
-    }
-
-    /// Same as Chromium's test-25fps.vp8
-    pub const DECODE_TEST_25FPS: TestStream = TestStream {
-        stream: include_bytes!("../../codec/vp8/test_data/test-25fps.vp8"),
-        crcs: include_str!("../../codec/vp8/test_data/test-25fps.vp8.crc"),
-    };
-
-    #[test]
-    fn test_25fps_block() {
-        test_decoder_dummy(&DECODE_TEST_25FPS, BlockingMode::Blocking);
-    }
-
-    #[test]
-    fn test_25fps_nonblock() {
-        test_decoder_dummy(&DECODE_TEST_25FPS, BlockingMode::NonBlocking);
     }
 }

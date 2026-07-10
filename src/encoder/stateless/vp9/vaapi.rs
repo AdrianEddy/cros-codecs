@@ -457,15 +457,17 @@ pub(super) mod tests {
             ],
         };
 
-        let mut encoder = VaapiVp9Encoder::new_vaapi(
+        let backend = VaapiBackend::<(), PooledVaSurface<()>>::new(
             Rc::clone(&display),
-            config,
+            VAProfileVP9Profile0,
             frame_layout.format.0,
             frame_layout.size,
+            libva::VA_RC_CBR,
             low_power,
-            BlockingMode::Blocking,
         )
         .unwrap();
+        let mut encoder =
+            VaapiVp9Encoder::new_vp9(backend, config, BlockingMode::Blocking).unwrap();
 
         let mut pool = VaSurfacePool::new(
             Rc::clone(&display),
@@ -547,15 +549,17 @@ pub(super) mod tests {
             ],
         };
 
-        let mut encoder = VaapiVp9Encoder::new_vaapi(
+        let backend = VaapiBackend::<(), PooledVaSurface<()>>::new(
             Rc::clone(&display),
-            config,
+            VAProfileVP9Profile2,
             frame_layout.format.0,
             frame_layout.size,
+            libva::VA_RC_CBR,
             low_power,
-            BlockingMode::Blocking,
         )
         .unwrap();
+        let mut encoder =
+            VaapiVp9Encoder::new_vp9(backend, config, BlockingMode::Blocking).unwrap();
 
         let mut pool = VaSurfacePool::new(
             Rc::clone(&display),

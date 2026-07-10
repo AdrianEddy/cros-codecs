@@ -885,15 +885,17 @@ mod tests {
             ],
         };
 
-        let mut encoder = VaapiAv1Encoder::new_vaapi(
+        let backend = VaapiBackend::<(), PooledVaSurface<()>>::new(
             Rc::clone(&display),
-            config,
+            VAProfileAV1Profile0,
             frame_layout.format.0,
             frame_layout.size,
+            libva::VA_RC_CQP,
             low_power,
-            BlockingMode::Blocking,
         )
         .unwrap();
+        let mut encoder =
+            VaapiAv1Encoder::new_av1(backend, config, BlockingMode::Blocking).unwrap();
 
         let mut pool = VaSurfacePool::new(
             Rc::clone(&display),
@@ -976,15 +978,17 @@ mod tests {
             ],
         };
 
-        let mut encoder = VaapiAv1Encoder::new_vaapi(
+        let backend = VaapiBackend::<(), PooledVaSurface<()>>::new(
             Rc::clone(&display),
-            config,
+            VAProfileAV1Profile0,
             frame_layout.format.0,
             frame_layout.size,
+            libva::VA_RC_CQP,
             low_power,
-            BlockingMode::Blocking,
         )
         .unwrap();
+        let mut encoder =
+            VaapiAv1Encoder::new_av1(backend, config, BlockingMode::Blocking).unwrap();
 
         let mut pool = VaSurfacePool::new(
             Rc::clone(&display),
