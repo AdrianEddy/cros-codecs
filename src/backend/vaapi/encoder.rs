@@ -49,6 +49,20 @@ impl From<libva::VaError> for StatelessBackendError {
     }
 }
 
+/// Upper bound (in bytes) for a single **CQP** (constant-quality; no bitrate
+/// target) coded frame at `coded_size`. Mirrors FFmpeg's `vaapi_encode` bound
+/// (`libavcodec/vaapi_encode.c`, `vaapi_encode_alloc_output_buffer`):
+/// `3 * width * height + 64 KiB` — twice the uncompressed 8-bit 4:2:0 frame
+/// (1.5 B/px) plus header slack. It over-estimates the largest possible
+/// compressed frame (a near-lossless all-I_PCM IDR is ~the uncompressed size),
+/// so a realistic low-QP 4K/8K IDR fits. Replaces the former fixed 1.5 MB
+/// default, which such an IDR would silently overflow (truncating the access
+/// unit).
+pub fn cqp_coded_buffer_size(coded_size: Resolution) -> usize {
+    let (w, h) = (coded_size.width as usize, coded_size.height as usize);
+    w.saturating_mul(h).saturating_mul(3).saturating_add(1 << 16)
+}
+
 pub(crate) fn tunings_to_libva_rc<const CLAMP_MIN_QP: u32, const CLAMP_MAX_QP: u32>(
     tunings: &Tunings,
 ) -> StatelessBackendResult<libva::EncMiscParameterRateControl> {
@@ -162,6 +176,9 @@ where
     context: Rc<Context>,
 
     _va_profile: VAProfile::Type,
+    /// Coded (aligned) resolution — used to size the CQP coded output buffer
+    /// from resolution (see [`Self::new_coded_buffer`]).
+    coded_size: Resolution,
     scratch_pool: VaSurfacePool<()>,
     _phantom: PhantomData<(M, H)>,
 }
@@ -223,6 +240,7 @@ where
             va_config,
             context,
             scratch_pool,
+            coded_size,
             _va_profile: va_profile,
             _phantom: Default::default(),
         })
@@ -239,13 +257,14 @@ where
         // Coded buffer size multiplier. It's inteded to give head room for the encoder.
         const CODED_SIZE_MUL: usize = 2;
 
-        // Default coded buffer size if bitrate control is not used.
-        const DEFAULT_CODED_SIZE: usize = 1_500_000;
-
         let coded_size = rate_control
             .bitrate_target()
+            // CBR: 2× the target bitrate (bytes) — unchanged, generously provisioned.
             .map(|e| e as usize * CODED_SIZE_MUL)
-            .unwrap_or(DEFAULT_CODED_SIZE);
+            // CQP (ConstantQuality): no bitrate target, so bound the buffer from the
+            // coded resolution instead of a fixed default that a low-QP 4K/8K IDR
+            // would silently overflow.
+            .unwrap_or_else(|| cqp_coded_buffer_size(self.coded_size));
 
         Ok(self.context().create_enc_coded(coded_size)?)
     }
@@ -357,7 +376,25 @@ where
         // Map coded buffer and collect bitstream
         let coded = MappedCodedBuffer::new(&self.coded_buf)?;
         let mut bitstream = self.coded_output;
+
+        // A driver-reported overflow/corruption in the coded segment status means
+        // the output does not hold the whole frame — surface it as a real error
+        // instead of silently appending a truncated, undecodable access unit.
+        // `new_coded_buffer` sizes the buffer so this is effectively unreachable
+        // for realistic content; this is the belt-and-suspenders guard on the
+        // sharp edge (a low-QP high-resolution IDR).
+        const OVERFLOW_MASK: u32 = libva::VA_CODED_BUF_STATUS_SLICE_OVERFLOW_MASK
+            | libva::VA_CODED_BUF_STATUS_FRAME_SIZE_OVERFLOW
+            | libva::VA_CODED_BUF_STATUS_BAD_BITSTREAM;
+
         for segment in coded.segments() {
+            if segment.status & OVERFLOW_MASK != 0 {
+                return Err(StatelessBackendError::Other(anyhow!(
+                    "vaapi encode: coded buffer overflow/corruption (VACodedBufferSegment status \
+                     {:#x}) — the encoded frame did not fit the coded output buffer or is corrupt",
+                    segment.status
+                )));
+            }
             // TODO: Handle flags?
             // NOTE: on flags: 0-7 bits are average QP value
             if segment.bit_offset > 0 {
