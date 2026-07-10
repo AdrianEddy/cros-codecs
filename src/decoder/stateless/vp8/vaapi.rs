@@ -226,7 +226,7 @@ impl<V: VideoFrame> StatelessVp8DecoderBackend for VaapiBackend<V> {
             timestamp,
             Rc::clone(&self.context),
             alloc_cb().ok_or(NewPictureError::OutOfOutputBuffers)?,
-        ))
+        )?)
     }
 
     fn submit_picture(
@@ -293,7 +293,10 @@ impl<V: VideoFrame> StatelessDecoder<Vp8, VaapiBackend<V>> {
         display: Rc<Display>,
         blocking_mode: BlockingMode,
     ) -> Result<Self, NewStatelessDecoderError> {
-        Self::new(VaapiBackend::new(display, false), blocking_mode)
+        Self::new(
+            VaapiBackend::new(display, false).map_err(|_| NewStatelessDecoderError::DriverInitialization)?,
+            blocking_mode,
+        )
     }
 }
 

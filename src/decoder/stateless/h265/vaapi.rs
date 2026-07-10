@@ -625,7 +625,7 @@ impl<V: VideoFrame> StatelessH265DecoderBackend for VaapiBackend<V> {
                 timestamp,
                 Rc::clone(&self.context),
                 alloc_cb().ok_or(NewPictureError::OutOfOutputBuffers)?,
-            ),
+            )?,
             last_slice: Default::default(),
             va_references: Default::default(),
         })
@@ -860,7 +860,10 @@ impl<V: VideoFrame> StatelessDecoder<H265, VaapiBackend<V>> {
         display: Rc<Display>,
         blocking_mode: BlockingMode,
     ) -> Result<Self, NewStatelessDecoderError> {
-        Self::new(VaapiBackend::new(display, false), blocking_mode)
+        Self::new(
+            VaapiBackend::new(display, false).map_err(|_| NewStatelessDecoderError::DriverInitialization)?,
+            blocking_mode,
+        )
     }
 }
 

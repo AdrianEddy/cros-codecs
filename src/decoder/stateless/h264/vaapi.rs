@@ -530,7 +530,7 @@ impl<V: VideoFrame> StatelessH264DecoderBackend for VaapiBackend<V> {
             timestamp,
             Rc::clone(&self.context),
             alloc_cb().ok_or(NewPictureError::OutOfOutputBuffers)?,
-        ))
+        )?)
     }
 
     fn new_field_picture(
@@ -549,7 +549,10 @@ impl<V: VideoFrame> StatelessDecoder<H264, VaapiBackend<V>> {
         display: Rc<Display>,
         blocking_mode: BlockingMode,
     ) -> Result<Self, NewStatelessDecoderError> {
-        Self::new(VaapiBackend::new(display, false), blocking_mode)
+        Self::new(
+            VaapiBackend::new(display, false).map_err(|_| NewStatelessDecoderError::DriverInitialization)?,
+            blocking_mode,
+        )
     }
 }
 

@@ -200,39 +200,42 @@ pub struct VaapiBackend<V: VideoFrame> {
 }
 
 impl<V: VideoFrame> VaapiBackend<V> {
-    pub(crate) fn new(display: Rc<libva::Display>, supports_context_reuse: bool) -> Self {
+    // W-F2 (panics→Results, §6.5): the initial config/context creation returns a
+    // `Result` instead of `.expect()`-panicking, so a driver that cannot create
+    // the bootstrap H.264-Main VLD config/context surfaces a `VaError` the caller
+    // classifies, rather than aborting the process.
+    pub(crate) fn new(
+        display: Rc<libva::Display>,
+        supports_context_reuse: bool,
+    ) -> Result<Self, VaError> {
         let init_stream_info = StreamInfo {
             format: DecodedFormat::NV12,
             coded_resolution: Resolution::from((16, 16)),
             display_resolution: Resolution::from((16, 16)),
             min_num_frames: 1,
         };
-        let config = display
-            .create_config(
-                vec![libva::VAConfigAttrib {
-                    type_: libva::VAConfigAttribType::VAConfigAttribRTFormat,
-                    value: libva::VA_RT_FORMAT_YUV420,
-                }],
-                libva::VAProfile::VAProfileH264Main,
-                libva::VAEntrypoint::VAEntrypointVLD,
-            )
-            .expect("Could not create initial VAConfig!");
-        let context = display
-            .create_context::<<V as VideoFrame>::MemDescriptor>(
-                &config,
-                init_stream_info.coded_resolution.width,
-                init_stream_info.coded_resolution.height,
-                None,
-                true,
-            )
-            .expect("Could not create initial VAContext!");
-        Self {
+        let config = display.create_config(
+            vec![libva::VAConfigAttrib {
+                type_: libva::VAConfigAttribType::VAConfigAttribRTFormat,
+                value: libva::VA_RT_FORMAT_YUV420,
+            }],
+            libva::VAProfile::VAProfileH264Main,
+            libva::VAEntrypoint::VAEntrypointVLD,
+        )?;
+        let context = display.create_context::<<V as VideoFrame>::MemDescriptor>(
+            &config,
+            init_stream_info.coded_resolution.width,
+            init_stream_info.coded_resolution.height,
+            None,
+            true,
+        )?;
+        Ok(Self {
             display: display,
             context: context,
             _supports_context_reuse: supports_context_reuse,
             stream_info: init_stream_info,
             _phantom_data: Default::default(),
-        }
+        })
     }
 
     pub(crate) fn new_sequence<StreamData>(
@@ -296,16 +299,17 @@ pub struct VaapiPicture<V: VideoFrame> {
 }
 
 impl<V: VideoFrame> VaapiPicture<V> {
-    pub fn new(timestamp: u64, context: Rc<Context>, backing_frame: V) -> Self {
+    // W-F2 (panics→Results, §6.5): the PRIME_2 decode-target re-import
+    // (`to_native_handle`) returns a `Result` instead of `.expect()`-panicking,
+    // so a driver that rejects the imported dmabuf (e.g. an unsupported modifier)
+    // surfaces an error the caller classifies rather than aborting the process.
+    pub fn new(timestamp: u64, context: Rc<Context>, backing_frame: V) -> anyhow::Result<Self> {
         let display = context.display();
-        let surface = backing_frame
-            .to_native_handle(display)
-            .expect("Failed to export video frame to vaapi picture!")
-            .into();
-        Self {
+        let surface = backing_frame.to_native_handle(display).map_err(|e| anyhow!(e))?.into();
+        Ok(Self {
             backing_frame: Arc::new(backing_frame),
             picture: Picture::new(timestamp, context, surface),
-        }
+        })
     }
 
     pub fn surface(&self) -> &Surface<V::MemDescriptor> {

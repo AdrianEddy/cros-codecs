@@ -385,6 +385,20 @@ impl GenericDmaVideoFrame {
         self.layout.planes.iter().map(|x| x.offset).collect()
     }
 
+    // W-F2 (panics→Results, §6.5): a fallible sibling of the `Clone` impl. The
+    // decode-target re-import (`to_native_handle`) needs a dup'd descriptor per
+    // call; under fd exhaustion (`EMFILE`) `Clone` would `.expect()`-panic, so the
+    // hot path uses this and propagates the error as `Result<_, String>` instead.
+    pub fn try_clone(&self) -> Result<Self, String> {
+        let mut dma_handles = Vec::with_capacity(self.dma_handles.len());
+        for x in &self.dma_handles {
+            // SAFETY: `dup` returns a fresh valid fd owned by the new `File`.
+            let fd = dup(x.as_raw_fd()).map_err(|e| format!("Could not dup DMAbuf FD: {e}"))?;
+            dma_handles.push(unsafe { File::from_raw_fd(fd) });
+        }
+        Ok(Self { dma_handles, layout: self.layout.clone() })
+    }
+
     fn map_helper(&self, is_writable: bool) -> Result<DmaMapping, String> {
         let lens = self.get_plane_size();
         let pitches = self.get_plane_pitch();
@@ -539,7 +553,8 @@ impl VideoFrame for GenericDmaVideoFrame {
                 self.resolution().height,
                 // TODO: Should we add USAGE_HINT_ENCODER support?
                 Some(UsageHint::USAGE_HINT_DECODER),
-                vec![self.clone()],
+                // W-F2: fallible dup — `EMFILE` here is an error, not a panic.
+                vec![self.try_clone()?],
             )
             .map_err(|_| "Error importing GenericDmaVideoFrame to VA-API".to_string())?;
 
