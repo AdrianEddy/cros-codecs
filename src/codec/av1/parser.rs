@@ -1769,7 +1769,13 @@ impl Parser {
         };
 
         let obu_reserved_1bit = r.0.read_bit()?;
-        assert!(!obu_reserved_1bit); // Must be set to zero as per spec.
+        // Must be zero per spec (§5.3.2 obu_reserved_1bit). Reject a malformed /
+        // hostile OBU header with an error instead of panicking, so callers
+        // parsing untrusted data (e.g. an MP4 `av1C` configOBUs blob) get a clean
+        // `Err` rather than an abort.
+        if obu_reserved_1bit {
+            return Err("obu_reserved_1bit must be zero".into());
+        }
 
         if header.extension_flag {
             header.temporal_id = r.0.read_bits::<u32>(3)?;
@@ -1822,8 +1828,11 @@ impl Parser {
         // Both "low-overhead" and Annex B are now at the same point, i.e.: a
         // open_bitstream_unit() follows.
         let header = Self::parse_obu_header(&mut reader)?;
-        if matches!(self.stream_format, StreamFormat::LowOverhead) {
-            assert!(header.has_size_field);
+        // A low-overhead OBU must carry obu_has_size_field (§5.2). Reject a
+        // malformed / hostile stream with an error instead of panicking, so
+        // callers parsing untrusted data get a clean `Err` rather than an abort.
+        if matches!(self.stream_format, StreamFormat::LowOverhead) && !header.has_size_field {
+            return Err("low-overhead OBU must set obu_has_size_field".into());
         }
 
         let obu_size: usize = if header.has_size_field {
