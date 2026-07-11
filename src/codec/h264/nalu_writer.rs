@@ -45,6 +45,22 @@ impl<W: Write> EmulationPrevention<W> {
         Ok(())
     }
 
+    /// Writes a H.265 (HEVC) 2-byte `nal_unit_header()` (H.265 7.3.1.2):
+    /// `forbidden_zero_bit` (1, always 0) | `nal_unit_type` (6) |
+    /// `nuh_layer_id` (6) | `nuh_temporal_id_plus1` (3).
+    fn write_header_hevc(
+        &mut self,
+        nalu_type: u8,
+        nuh_layer_id: u8,
+        nuh_temporal_id_plus1: u8,
+    ) -> NaluWriterResult<()> {
+        let byte0 = ((nalu_type & 0b11_1111) << 1) | ((nuh_layer_id >> 5) & 0b1);
+        let byte1 = ((nuh_layer_id & 0b1_1111) << 3) | (nuh_temporal_id_plus1 & 0b111);
+        self.out.write_all(&[0x00, 0x00, 0x00, 0x01, byte0, byte1])?;
+
+        Ok(())
+    }
+
     fn has_data_pending(&self) -> bool {
         self.prev_bytes[0].is_some() || self.prev_bytes[1].is_some()
     }
@@ -178,6 +194,19 @@ impl<W: Write> NaluWriter<W> {
     pub fn write_header(&mut self, idc: u8, _type: u8) -> NaluWriterResult<()> {
         self.0.flush()?;
         self.0.inner_mut().write_header(idc, _type)?;
+        Ok(())
+    }
+
+    /// Writes a H.265 (HEVC) 2-byte `nal_unit_header()`. See
+    /// [`EmulationPrevention::write_header_hevc`].
+    pub fn write_header_hevc(
+        &mut self,
+        nalu_type: u8,
+        nuh_layer_id: u8,
+        nuh_temporal_id_plus1: u8,
+    ) -> NaluWriterResult<()> {
+        self.0.flush()?;
+        self.0.inner_mut().write_header_hevc(nalu_type, nuh_layer_id, nuh_temporal_id_plus1)?;
         Ok(())
     }
 

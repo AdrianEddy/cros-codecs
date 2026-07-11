@@ -5,3 +5,4 @@
 pub mod dpb;
 pub mod parser;
 pub mod picture;
+pub mod synthesizer;

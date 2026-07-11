@@ -2453,7 +2453,10 @@ impl Parser {
         }
 
         for i in 0..sps_max_sub_layers_minus_1 as usize {
-            if ptl.sub_layer_level_present_flag[i] {
+            // §7.3.3: the sub-layer profile block gates on
+            // sub_layer_profile_present_flag[i]; the level field below gates on
+            // sub_layer_level_present_flag[i].
+            if ptl.sub_layer_profile_present_flag[i] {
                 ptl.sub_layer_profile_space[i] = r.read_bits(2)?;
                 ptl.sub_layer_tier_flag[i] = r.read_bit()?;
                 ptl.sub_layer_profile_idc[i] = r.read_bits(5)?;
@@ -2535,11 +2538,11 @@ impl Parser {
                 } else {
                     r.skip_bits(1)?;
                 }
+            }
 
-                if ptl.sub_layer_level_present_flag[i] {
-                    let level: u8 = r.read_bits(8)?;
-                    ptl.sub_layer_level_idc[i] = Level::try_from(level)?;
-                }
+            if ptl.sub_layer_level_present_flag[i] {
+                let level: u8 = r.read_bits(8)?;
+                ptl.sub_layer_level_idc[i] = Level::try_from(level)?;
             }
         }
         Ok(())
@@ -2885,6 +2888,10 @@ impl Parser {
             hrd.fixed_pic_rate_general_flag[i] = r.read_bit()?;
             if !hrd.fixed_pic_rate_general_flag[i] {
                 hrd.fixed_pic_rate_within_cvs_flag[i] = r.read_bit()?;
+            } else {
+                // §E.2.2: when fixed_pic_rate_general_flag[i] == 1,
+                // fixed_pic_rate_within_cvs_flag[i] is inferred to be 1.
+                hrd.fixed_pic_rate_within_cvs_flag[i] = true;
             }
             if hrd.fixed_pic_rate_within_cvs_flag[i] {
                 hrd.elemental_duration_in_tc_minus1[i] = r.read_ue_max(2047)?;
@@ -3632,7 +3639,10 @@ impl Parser {
                 pwt.luma_weight_l1_flag[i] = r.read_bit()?;
             }
 
-            if sps.chroma_format_idc != 0 {
+            // §7.3.6.3: the L1 chroma_weight flag loop gates on ChromaArrayType,
+            // matching the L0 loop above (not chroma_format_idc — they differ
+            // when separate_colour_plane_flag == 1).
+            if sps.chroma_array_type != 0 {
                 for i in 0..=usize::from(hdr.num_ref_idx_l1_active_minus1) {
                     pwt.chroma_weight_l1_flag[i] = r.read_bit()?;
                 }
