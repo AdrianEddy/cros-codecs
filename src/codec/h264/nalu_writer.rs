@@ -24,8 +24,18 @@ impl<W: Write> EmulationPrevention<W> {
     fn write_byte(&mut self, curr_byte: u8) -> std::io::Result<()> {
         if self.prev_bytes[1] == Some(0x00) && self.prev_bytes[0] == Some(0x00) && curr_byte <= 0x03
         {
-            self.out.write_all(&[0x00, 0x00, 0x03, curr_byte])?;
-            self.prev_bytes = [None; 2];
+            // Emit the two held zeros + the emulation_prevention_three_byte, then
+            // RETAIN `curr_byte` as the newest still-pending byte instead of
+            // clearing the run context. `curr_byte` (which may be `0x00`) is a
+            // valid start of the next `00 00 {00,01,02,03}` run, so it must keep
+            // participating in escape detection. The former
+            // `write_all(&[00,00,03,curr]); prev = [None; 2]` dropped it, so an
+            // input like `00 00 00 00 01` produced `..03 00 00 01` — a spurious
+            // start-code emulation (M7b review finding 6). Existing H.264 EPB
+            // tests still pass (the trailing byte was flushed anyway); the new
+            // `00 00 00 00 01 -> 00 00 03 00 00 03 01` case is now correct.
+            self.out.write_all(&[0x00, 0x00, 0x03])?;
+            self.prev_bytes = [Some(curr_byte), None];
         } else {
             if let Some(byte) = self.prev_bytes[1] {
                 self.out.write_all(&[byte])?;
@@ -324,5 +334,13 @@ mod tests {
         test(&[0x00, 0x00, 0x00, 0x01], &[0x00, 0x00, 0x03, 0x00, 0x01]);
         test(&[0x00, 0x00, 0x00, 0x02], &[0x00, 0x00, 0x03, 0x00, 0x02]);
         test(&[0x00, 0x00, 0x00, 0x03], &[0x00, 0x00, 0x03, 0x00, 0x03]);
+
+        // M7b review finding 6: a ≥4-zero run followed by a low byte must retain
+        // the escape's trailing zero as run context. `00 00 00 00 01` escapes the
+        // first three zeros, then the retained fourth zero + the fifth make a new
+        // `00 00 01` run that is itself escaped → `00 00 03 00 00 03 01` (the read
+        // path recovers the original five bytes, proving no false start code).
+        test(&[0x00, 0x00, 0x00, 0x00, 0x01], &[0x00, 0x00, 0x03, 0x00, 0x00, 0x03, 0x01]);
+        test(&[0x00, 0x00, 0x00, 0x00, 0x00, 0x00], &[0x00, 0x00, 0x03, 0x00, 0x00, 0x03, 0x00, 0x00]);
     }
 }

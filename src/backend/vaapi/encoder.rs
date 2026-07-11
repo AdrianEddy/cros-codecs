@@ -179,6 +179,12 @@ where
     /// Coded (aligned) resolution — used to size the CQP coded output buffer
     /// from resolution (see [`Self::new_coded_buffer`]).
     coded_size: Resolution,
+    /// The mask of application-packed header types the driver expects
+    /// (`VA_ENC_PACKED_HEADER_*`). `0` (`VA_ENC_PACKED_HEADER_NONE`) means the
+    /// driver self-generates them (H.264 / VP9 / AV1 here, and HEVC on Mesa);
+    /// non-zero (HEVC on iHD) means the codec backend must submit the packed
+    /// VPS/SPS/PPS(/slice). See [`crate::encoder::stateless::h265::vaapi`].
+    packed_headers: u32,
     scratch_pool: VaSurfacePool<()>,
     _phantom: PhantomData<(M, H)>,
 }
@@ -196,6 +202,32 @@ where
         bitrate_control: u32,
         low_power: bool,
     ) -> StatelessBackendResult<Self> {
+        // Drivers that self-generate the parameter sets (H.264 / VP9 / AV1, and
+        // HEVC on Mesa) need no packed-header attribute.
+        Self::new_with_packed_headers(
+            display,
+            va_profile,
+            fourcc,
+            coded_size,
+            bitrate_control,
+            low_power,
+            libva::VA_ENC_PACKED_HEADER_NONE,
+        )
+    }
+
+    /// [`Self::new`] plus the `VAConfigAttribEncPackedHeaders` value the codec
+    /// needs. When `packed_headers != 0` the config advertises it so the driver
+    /// accepts the application-packed VPS/SPS/PPS(/slice) buffers (HEVC on iHD);
+    /// `0` leaves the attribute off (the driver self-generates).
+    pub fn new_with_packed_headers(
+        display: Rc<Display>,
+        va_profile: VAProfile::Type,
+        fourcc: Fourcc,
+        coded_size: Resolution,
+        bitrate_control: u32,
+        low_power: bool,
+        packed_headers: u32,
+    ) -> StatelessBackendResult<Self> {
         let format_map = FORMAT_MAP
             .iter()
             .find(|&map| map.va_fourcc == fourcc.0)
@@ -203,17 +235,25 @@ where
 
         let rt_format = format_map.rt_format;
 
+        let mut attrs = vec![
+            libva::VAConfigAttrib {
+                type_: libva::VAConfigAttribType::VAConfigAttribRTFormat,
+                value: rt_format,
+            },
+            libva::VAConfigAttrib {
+                type_: libva::VAConfigAttribType::VAConfigAttribRateControl,
+                value: bitrate_control,
+            },
+        ];
+        if packed_headers != libva::VA_ENC_PACKED_HEADER_NONE {
+            attrs.push(libva::VAConfigAttrib {
+                type_: libva::VAConfigAttribType::VAConfigAttribEncPackedHeaders,
+                value: packed_headers,
+            });
+        }
+
         let va_config = display.create_config(
-            vec![
-                libva::VAConfigAttrib {
-                    type_: libva::VAConfigAttribType::VAConfigAttribRTFormat,
-                    value: rt_format,
-                },
-                libva::VAConfigAttrib {
-                    type_: libva::VAConfigAttribType::VAConfigAttribRateControl,
-                    value: bitrate_control,
-                },
-            ],
+            attrs,
             va_profile,
             if low_power { VAEntrypointEncSliceLP } else { VAEntrypointEncSlice },
         )?;
@@ -241,9 +281,17 @@ where
             context,
             scratch_pool,
             coded_size,
+            packed_headers,
             _va_profile: va_profile,
             _phantom: Default::default(),
         })
+    }
+
+    /// The mask of application-packed header types the driver expects (see the
+    /// [`Self::packed_headers`] field). Read by the HEVC backend to decide which
+    /// packed headers to synthesise.
+    pub(crate) fn packed_headers(&self) -> u32 {
+        self.packed_headers
     }
 
     pub(crate) fn context(&self) -> &Rc<Context> {
