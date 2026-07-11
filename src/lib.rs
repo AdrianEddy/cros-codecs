@@ -218,6 +218,12 @@ pub enum DecodedFormat {
     I410,
     /// Y, U and V planes, 4:4:4 sampling, 16 bits per sample, LE. Only the 12 LSBs are used.
     I412,
+    /// One Y and one interleaved UV plane, 4:2:0 sampling, 16 bits per sample,
+    /// LE. Only the 10 MSBs are used (MSB-justified samples).
+    P010,
+    /// Single packed plane, 4:2:2 sampling, 16 bits per sample, LE, ordered
+    /// Y0 U Y1 V. Only the 10 MSBs of each sample are used (MSB-justified).
+    Y210,
     /// One Y and one interleaved UV plane, 4:2:0 sampling, 8 bits per sample.
     /// In a tiled format.
     MM21,
@@ -238,9 +244,12 @@ impl FromStr for DecodedFormat {
             "i212" | "I212" => Ok(DecodedFormat::I212),
             "i410" | "I410" => Ok(DecodedFormat::I410),
             "i412" | "I412" => Ok(DecodedFormat::I412),
+            "p010" | "P010" => Ok(DecodedFormat::P010),
+            "y210" | "Y210" => Ok(DecodedFormat::Y210),
             "mm21" | "MM21" => Ok(DecodedFormat::MM21),
             _ => Err("unrecognized output format. \
-                Valid values: i420, nv12, i422, i444, i010, i012, i210, i212, i410, i412, mm21"),
+                Valid values: i420, nv12, i422, i444, i010, i012, i210, i212, i410, i412, p010, \
+                y210, mm21"),
         }
     }
 }
@@ -251,11 +260,13 @@ impl From<Fourcc> for DecodedFormat {
             "I420" => DecodedFormat::I420,
             "NV12" | "NM12" => DecodedFormat::NV12,
             "MM21" => DecodedFormat::MM21,
-            // W-F1: 10-bit decode-output surfaces. P010 (2-plane 4:2:0-10) and
-            // Y210 (packed 4:2:2-10) map to the I010 / I210 CPU-readback formats,
-            // matching FORMAT_MAP in backend/vaapi.rs.
-            "P010" => DecodedFormat::I010,
-            "Y210" => DecodedFormat::I210,
+            // 10-bit decode-output surfaces. P010 (2-plane semi-planar
+            // 4:2:0-10) and Y210 (single-plane packed 4:2:2-10) map to their own
+            // variants — NOT to the planar, LSB-justified I010/I210 — so plane
+            // count, packing and sample justification stay truthful for every
+            // consumer (StreamInfo, VideoFrame layout math, CPU readback).
+            "P010" => DecodedFormat::P010,
+            "Y210" => DecodedFormat::Y210,
             _ => todo!("Fourcc {} not yet supported", fourcc),
         }
     }
@@ -267,9 +278,8 @@ impl From<DecodedFormat> for Fourcc {
             DecodedFormat::I420 => Fourcc::from(b"I420"),
             DecodedFormat::NV12 => Fourcc::from(b"NV12"),
             DecodedFormat::MM21 => Fourcc::from(b"MM21"),
-            // W-F1: 10-bit decode-output surfaces (see FORMAT_MAP).
-            DecodedFormat::I010 => Fourcc::from(b"P010"),
-            DecodedFormat::I210 => Fourcc::from(b"Y210"),
+            DecodedFormat::P010 => Fourcc::from(b"P010"),
+            DecodedFormat::Y210 => Fourcc::from(b"Y210"),
             _ => todo!(),
         }
     }
@@ -421,6 +431,12 @@ pub fn decoded_frame_size(format: DecodedFormat, width: usize, height: usize) ->
             u_size + uv_size
         }
         DecodedFormat::I410 | DecodedFormat::I412 => (width * height * 2) * 3,
+        // Same byte count as I010: 16 bits per sample, 4:2:0, with the UV plane
+        // interleaved instead of split.
+        DecodedFormat::P010 => decoded_frame_size(DecodedFormat::I420, width, height) * 2,
+        // Packed 4:2:2 at 16 bits per sample: 8 bytes per 2-pixel group, with
+        // rows aligned to a full group.
+        DecodedFormat::Y210 => ((width + 1) / 2) * 8 * height,
         DecodedFormat::MM21 => panic!("Unable to convert to MM21"),
     }
 }
@@ -440,19 +456,48 @@ mod tests {
 
     const NV12_FOURCC: u32 = 0x3231564E;
 
-    // W-F1: the 10-bit decode-output surfaces round-trip between their VA fourcc
-    // and the DecodedFormat that FORMAT_MAP (backend/vaapi.rs) pairs them with.
+    // The 10-bit decode-output surfaces round-trip between their VA fourcc
+    // and their own DecodedFormat variants (P010/Y210 are semi-planar/packed and
+    // MSB-justified, distinct from the planar LSB-justified I010/I210).
     #[test]
     fn decoded_format_10bit_fourcc_roundtrip() {
-        // 10-bit 4:2:0 (P010) <-> I010
-        assert_eq!(DecodedFormat::from(Fourcc::from(b"P010")), DecodedFormat::I010);
-        assert_eq!(Fourcc::from(DecodedFormat::I010), Fourcc::from(b"P010"));
-        // 10-bit 4:2:2 (Y210) <-> I210
-        assert_eq!(DecodedFormat::from(Fourcc::from(b"Y210")), DecodedFormat::I210);
-        assert_eq!(Fourcc::from(DecodedFormat::I210), Fourcc::from(b"Y210"));
+        // 10-bit 4:2:0 (P010) <-> P010
+        assert_eq!(DecodedFormat::from(Fourcc::from(b"P010")), DecodedFormat::P010);
+        assert_eq!(Fourcc::from(DecodedFormat::P010), Fourcc::from(b"P010"));
+        // 10-bit 4:2:2 (Y210) <-> Y210
+        assert_eq!(DecodedFormat::from(Fourcc::from(b"Y210")), DecodedFormat::Y210);
+        assert_eq!(Fourcc::from(DecodedFormat::Y210), Fourcc::from(b"Y210"));
         // 8-bit 4:2:0 (NV12) still maps as before.
         assert_eq!(DecodedFormat::from(Fourcc::from(b"NV12")), DecodedFormat::NV12);
         assert_eq!(Fourcc::from(DecodedFormat::NV12), Fourcc::from(b"NV12"));
+    }
+
+    // The native P010/Y210 fourccs must not resolve to the planar I010/I210
+    // variants: those are documented as three-plane, LSB-justified layouts and
+    // carry different plane math.
+    #[test]
+    fn native_10bit_fourccs_are_not_planar_formats() {
+        assert_ne!(DecodedFormat::from(Fourcc::from(b"P010")), DecodedFormat::I010);
+        assert_ne!(DecodedFormat::from(Fourcc::from(b"Y210")), DecodedFormat::I210);
+    }
+
+    #[test]
+    fn decoded_frame_size_p010_y210() {
+        use super::decoded_frame_size;
+
+        // P010: 16-bit 4:2:0 — twice the NV12/I420 byte count.
+        assert_eq!(
+            decoded_frame_size(DecodedFormat::P010, 4, 4),
+            2 * decoded_frame_size(DecodedFormat::NV12, 4, 4)
+        );
+        assert_eq!(decoded_frame_size(DecodedFormat::P010, 2, 2), 12);
+        // Odd width/height round the chroma plane up.
+        assert_eq!(decoded_frame_size(DecodedFormat::P010, 3, 3), 3 * 3 * 2 + 2 * 2 * 2 * 2);
+
+        // Y210: packed 4:2:2, 8 bytes per 2-pixel group per row.
+        assert_eq!(decoded_frame_size(DecodedFormat::Y210, 4, 4), 4 / 2 * 8 * 4);
+        // Odd width rounds up to a full Y0-U-Y1-V group.
+        assert_eq!(decoded_frame_size(DecodedFormat::Y210, 3, 2), 2 * 8 * 2);
     }
 
     #[test]

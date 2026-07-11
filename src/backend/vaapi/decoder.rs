@@ -155,7 +155,7 @@ impl<M: SurfaceMemoryDescriptor> PictureState<M> {
     }
 }
 
-/// The grain-applied display target of an AV1 film-grain frame (W-F9).
+/// The grain-applied display target of an AV1 film-grain frame.
 ///
 /// AV1 film grain is applied outside the coding loop, so the frame kept as a DPB
 /// reference must stay grain-free while the presented frame carries the grain.
@@ -181,8 +181,8 @@ pub struct VaapiDecodedHandle<V: VideoFrame> {
     state: PictureState<<V as VideoFrame>::MemDescriptor>,
     /// Actual resolution of the visible rectangle in the decoded buffer.
     display_resolution: Resolution,
-    /// The grain-applied display target when this handle applies AV1 film grain
-    /// (W-F9); `None` when output == reconstruct (the common case).
+    /// The grain-applied display target when this handle applies AV1 film grain;
+    /// `None` when output == reconstruct (the common case).
     display: Option<VaapiDisplayTarget<V>>,
 }
 
@@ -202,7 +202,7 @@ impl<V: VideoFrame> VaapiDecodedHandle<V> {
 
     fn sync(&mut self) -> Result<(), VaError> {
         self.state.sync()?;
-        // W-F9: the grain-applied display surface is written by the same decode
+        // The grain-applied display surface is written by the same decode
         // operation but is a distinct surface, so it must be synced too before
         // the display frame is read/exported.
         if let Some(display) = &self.display {
@@ -240,22 +240,28 @@ pub struct VaapiBackend<V: VideoFrame> {
     _phantom_data: PhantomData<V>,
 }
 
-/// W-F1: maps a stream `RT_FORMAT` to the CPU-side [`DecodedFormat`] of the
+/// Maps a stream `RT_FORMAT` to the [`DecodedFormat`] of the native
 /// surfaces we export for zero-copy DMA output. Only the three formats that have
 /// output wiring are supported:
-/// - `YUV420`    → NV12  (8-bit 4:2:0)
-/// - `YUV420_10` → P010  (10-bit 4:2:0, [`DecodedFormat::I010`])
-/// - `YUV422_10` → Y210  (10-bit 4:2:2, [`DecodedFormat::I210`])
+/// - `YUV420`    → [`DecodedFormat::NV12`] (8-bit 4:2:0)
+/// - `YUV420_10` → [`DecodedFormat::P010`] (10-bit 4:2:0, 2-plane semi-planar,
+///   MSB-justified)
+/// - `YUV422_10` → [`DecodedFormat::Y210`] (10-bit 4:2:2, single packed plane,
+///   MSB-justified)
+///
+/// The reported format describes the actual surface layout — the planar,
+/// LSB-justified [`DecodedFormat::I010`]/[`DecodedFormat::I210`] would be a lie
+/// for these surfaces and mislead `StreamInfo` consumers and CPU readback.
 ///
 /// 12-bit (P012/Y212) and 4:4:4 (Y410/Y412) have no output wiring yet and are
-/// rejected with an explicit error, so profiles such as HEVC Main12/Main444 —
-/// which `va_profile()` now maps (W-F10) — still fail cleanly here instead of
+/// rejected with an explicit error, so profiles such as HEVC Main12/Main444
+/// still fail cleanly here instead of
 /// decoding into a wrong-layout surface.
 fn output_decoded_format(rt_format: u32) -> anyhow::Result<DecodedFormat> {
     match rt_format {
         libva::VA_RT_FORMAT_YUV420 => Ok(DecodedFormat::NV12),
-        libva::VA_RT_FORMAT_YUV420_10 => Ok(DecodedFormat::I010),
-        libva::VA_RT_FORMAT_YUV422_10 => Ok(DecodedFormat::I210),
+        libva::VA_RT_FORMAT_YUV420_10 => Ok(DecodedFormat::P010),
+        libva::VA_RT_FORMAT_YUV422_10 => Ok(DecodedFormat::Y210),
         other => Err(anyhow!(
             "Unsupported decode output RT format {:#x}: only 8-bit 4:2:0 (NV12), \
              10-bit 4:2:0 (P010) and 10-bit 4:2:2 (Y210) are wired for output",
@@ -265,7 +271,7 @@ fn output_decoded_format(rt_format: u32) -> anyhow::Result<DecodedFormat> {
 }
 
 impl<V: VideoFrame> VaapiBackend<V> {
-    // W-F2 (panics→Results, §6.5): the initial config/context creation returns a
+    // The initial config/context creation returns a
     // `Result` instead of `.expect()`-panicking, so a driver that cannot create
     // the bootstrap H.264-Main VLD config/context surfaces a `VaError` the caller
     // classifies, rather than aborting the process.
@@ -314,7 +320,7 @@ impl<V: VideoFrame> VaapiBackend<V> {
         self.stream_info.coded_resolution = stream_params.coded_size().clone();
         self.stream_info.min_num_frames = stream_params.min_num_surfaces();
 
-        // W-F1: derive the RT format and the output `DecodedFormat` from the
+        // Derive the RT format and the output `DecodedFormat` from the
         // stream's bit depth and chroma subsampling instead of hardcoding 8-bit
         // 4:2:0. Only the three formats with zero-copy DMA output wiring are
         // accepted (see `output_decoded_format`); any other (12-bit, 4:4:4, …)
@@ -371,13 +377,13 @@ impl<V: VideoFrame> VaapiBackend<V> {
 pub struct VaapiPicture<V: VideoFrame> {
     picture: Picture<PictureNew, Surface<V::MemDescriptor>>,
     backing_frame: Arc<V>,
-    /// The grain-applied display target for AV1 film grain (W-F9); `None` when
+    /// The grain-applied display target for AV1 film grain; `None` when
     /// output == reconstruct. Threaded onto the [`VaapiDecodedHandle`] at submit.
     display: Option<VaapiDisplayTarget<V>>,
 }
 
 impl<V: VideoFrame> VaapiPicture<V> {
-    // W-F2 (panics→Results, §6.5): the PRIME_2 decode-target re-import
+    // The PRIME_2 decode-target re-import
     // (`to_native_handle`) returns a `Result` instead of `.expect()`-panicking,
     // so a driver that rejects the imported dmabuf (e.g. an unsupported modifier)
     // surfaces an error the caller classifies rather than aborting the process.
@@ -391,8 +397,8 @@ impl<V: VideoFrame> VaapiPicture<V> {
         })
     }
 
-    /// Creates a picture with a distinct grain-applied display target (AV1 film
-    /// grain, W-F9). The decode renders the grain-free reconstruct into
+    /// Creates a picture with a distinct grain-applied display target for AV1
+    /// film grain. The decode renders the grain-free reconstruct into
     /// `backing_frame`'s surface (the DPB reference / `current_frame`), and the
     /// driver writes the grain-applied output into `display_frame`'s surface
     /// (`current_display_picture`). Both frames come from the same caller pool.
@@ -419,7 +425,7 @@ impl<V: VideoFrame> VaapiPicture<V> {
         self.picture.surface()
     }
 
-    /// The VA surface id of the grain-applied display target (W-F9), or
+    /// The VA surface id of the grain-applied display target, or
     /// [`libva::VA_INVALID_SURFACE`] when there is none — the value the AV1
     /// picture parameter's `current_display_picture` field expects (grain-free
     /// frames leave it invalid so the driver applies no grain).

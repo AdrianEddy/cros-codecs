@@ -41,7 +41,7 @@ use crate::Resolution;
 ///
 /// AV1 keeps up to `NUM_REF_FRAMES` (8) DPB references plus in-flight decode and
 /// client-held output surfaces. The extra +2 over the base covers the in-flight
-/// grain-applied display surfaces (W-F9): a film-grain frame allocates a second
+/// grain-applied display surfaces: a film-grain frame allocates a second
 /// surface for its display output while the grain-free reconstruct stays in the
 /// DPB. Only in-flight grain frames need the headroom — DPB references are always
 /// grain-free reconstructs, so this is +2, not 2×.
@@ -418,7 +418,7 @@ fn build_pic_param<V: VideoFrame>(
             .context("Invalid matrix_coefficients")?,
         &seq_info_fields,
         current_frame,           /* grain-free reconstruct (DPB-referenced) */
-        current_display_picture, /* grain-applied display output, or VA_INVALID_SURFACE (W-F9) */
+        current_display_picture, /* grain-applied display output, or VA_INVALID_SURFACE */
         vec![],                  /* anchor_frames_list */
         u16::try_from(hdr.upscaled_width - 1).context("Invalid frame width")?,
         u16::try_from(hdr.frame_height - 1).context("Invalid frame height")?,
@@ -510,7 +510,7 @@ impl<V: VideoFrame> StatelessAV1DecoderBackend for VaapiBackend<V> {
         // decode render target and the DPB reference.
         let reconstruct = alloc_cb().ok_or(NewPictureError::OutOfOutputBuffers)?;
         if hdr.film_grain_params.apply_grain {
-            // W-F9: film grain is applied outside the coding loop, so the display
+            // Film grain is applied outside the coding loop, so the display
             // output must differ from the grain-free reconstruct kept as a
             // reference. Allocate a second surface from the same caller pool for
             // the grain-applied display output (`current_display_picture`).
@@ -535,7 +535,7 @@ impl<V: VideoFrame> StatelessAV1DecoderBackend for VaapiBackend<V> {
     ) -> StatelessBackendResult<()> {
         // `current_frame` = the grain-free reconstruct (this picture's render
         // target, a DPB reference); `current_display_picture` = the grain-applied
-        // display surface when film grain applies, else VA_INVALID_SURFACE (W-F9).
+        // display surface when film grain applies, else VA_INVALID_SURFACE.
         let pic_param = build_pic_param(
             hdr,
             stream_info,

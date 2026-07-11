@@ -32,7 +32,6 @@ use crate::encoder::stateless::av1::BackendRequest;
 use crate::encoder::stateless::av1::EncoderConfig;
 use crate::encoder::stateless::predictor::LowDelay;
 use crate::encoder::stateless::predictor::LowDelayDelegate;
-use crate::encoder::EncodeError;
 use crate::encoder::EncodeResult;
 use crate::encoder::FrameMetadata;
 use crate::encoder::RateControl;
@@ -74,7 +73,7 @@ impl<Picture, Reference> LowDelayAV1<Picture, Reference> {
         let width = config.resolution.width;
         let height = config.resolution.height;
 
-        // W-F5: optional CICP colour description in `color_config`. Absent ⇒
+        // Optional CICP colour description in `color_config`. When absent,
         // `color_description_present_flag == 0` with primaries/transfer/matrix
         // left Unspecified — the exact combination the synthesizer requires when
         // the flag is 0, so 8-bit/10-bit streams without colour stay byte-identical.
@@ -180,16 +179,20 @@ impl<Picture, Reference> LowDelayAV1<Picture, Reference> {
         let order_hint_mask = (1 << self.delegate.sequence.order_hint_bits) - 1;
         let order_hint = (self.counter & order_hint_mask) as u32;
 
-        let RateControl::ConstantQuality(base_q_idx) = self.tunings.rate_control else {
-            return Err(EncodeError::Unsupported);
+        // Clamp tunings's quality range to the AV1 base Q index domain. Raising
+        // the upper bound to at least the lower one keeps `clamp` total even for
+        // a misconfigured `min_quality > MAX_BASE_QINDEX`.
+        let min_q_idx = self.tunings.min_quality.clamp(MIN_BASE_QINDEX, MAX_BASE_QINDEX);
+        let max_q_idx = self.tunings.max_quality.clamp(min_q_idx, MAX_BASE_QINDEX);
+
+        let base_q_idx = match self.tunings.rate_control {
+            // Clamp the requested constant Q index into the allowed range
+            RateControl::ConstantQuality(base_q_idx) => base_q_idx.clamp(min_q_idx, max_q_idx),
+            // CBR/VBR: the driver's rate controller picks the effective per-frame
+            // quantizer within [min_q_idx, max_q_idx]; seed `base_q_idx` with the
+            // midpoint of that range, as the H.264/VP9/HEVC predictors do.
+            _ => (min_q_idx + max_q_idx) / 2,
         };
-
-        // Clamp tunings's quaility range to correct range
-        let min_q_idx = self.tunings.min_quality.max(MIN_BASE_QINDEX);
-        let max_q_idx = self.tunings.max_quality.min(MAX_BASE_QINDEX);
-
-        // Clamp Q index
-        let base_q_idx = base_q_idx.clamp(min_q_idx, max_q_idx);
 
         // Set the frame size in superblocks for the only tile
         let mut width_in_sbs_minus_1 = [0u32; MAX_TILE_COLS];

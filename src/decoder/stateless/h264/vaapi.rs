@@ -70,7 +70,7 @@ impl VaStreamInfo for &Rc<Sps> {
                 }
             }
             Profile::High | Profile::High422P | Profile::High10 => {
-                // W-F10(b): High10 and High 4:2:2 have their own VA profiles
+                // High10 and High 4:2:2 have their own VA profiles
                 // (VAProfileH264High10 / VAProfileH264High422), but this backend
                 // only maps to VAProfileH264High. Decoding a >8-bit or non-4:2:0
                 // stream as 8-bit 4:2:0 High is a silent wrong-output bug, so
@@ -93,8 +93,8 @@ impl VaStreamInfo for &Rc<Sps> {
     }
 
     fn rt_format(&self) -> anyhow::Result<u32> {
-        // Derive from the luma bit depth (not chroma — the pre-W-F1 code read
-        // the wrong field; masked while only 8-bit 4:2:0 reached here, but a
+        // Derive from the luma bit depth rather than chroma. Reading the chroma
+        // field is masked while only 8-bit 4:2:0 reaches here, but creates a
         // latent wrong-output bug now that rt_format() is live). Use the max so
         // the RT format is never under-provisioned if the two ever differ.
         let bit_depth_luma = self.bit_depth_luma_minus8.max(self.bit_depth_chroma_minus8) + 8;

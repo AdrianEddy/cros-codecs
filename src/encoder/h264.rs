@@ -21,7 +21,7 @@ pub struct EncoderConfig {
     pub initial_tunings: Tunings,
     /// Optional CICP colour description threaded into the SPS VUI
     /// (`colour_description` + `video_full_range_flag`). `None` ⇒ no colour is
-    /// signalled (byte-identical to the pre-M8 encoder).
+    /// signalled.
     pub color: Option<EncoderColorInfo>,
 }
 

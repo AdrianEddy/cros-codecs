@@ -99,8 +99,8 @@ impl<Picture, Reference> LowDelayH264<Picture, Reference> {
             .aspect_ratio(1, 1)
             .timing_info(1, self.tunings.framerate * 2, false);
 
-        // W-F5: thread the caller's CICP colour description into the VUI. Absent
-        // ⇒ the VUI carries no `video_signal_type` block (unchanged behaviour).
+        // Thread the caller's optional CICP colour description into the VUI.
+        // When absent, the VUI carries no `video_signal_type` block.
         if let Some(c) = config.color {
             sps = sps.video_signal_type(c.full_range, c.primaries, c.transfer, c.matrix);
         }

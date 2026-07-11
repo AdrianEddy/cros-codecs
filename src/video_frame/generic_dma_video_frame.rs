@@ -385,7 +385,7 @@ impl GenericDmaVideoFrame {
         self.layout.planes.iter().map(|x| x.offset).collect()
     }
 
-    // W-F2 (panics→Results, §6.5): a fallible sibling of the `Clone` impl. The
+    // A fallible sibling of the `Clone` impl. The
     // decode-target re-import (`to_native_handle`) needs a dup'd descriptor per
     // call; under fd exhaustion (`EMFILE`) `Clone` would `.expect()`-panic, so the
     // hot path uses this and propagates the error as `Result<_, String>` instead.
@@ -493,14 +493,13 @@ impl VideoFrame for GenericDmaVideoFrame {
         self.layout.size.clone()
     }
 
-    // W-F1: the plane count must come from the actual FrameLayout, not from the
-    // fourcc→DecodedFormat guess used by the default trait impl. P010 (fourcc →
-    // DecodedFormat::I010) is a 2-plane semi-planar surface and Y210 (→ I210) is
-    // single-plane packed, whereas the default `num_planes()` would report 3 for
-    // the nominally-planar I010/I210 formats and corrupt both the PRIME_2 layer
-    // descriptor and the per-plane size math (`get_single_plane_size` would index
-    // past `layout.planes`). This is behaviour-preserving for NV12/I420/etc.,
-    // whose layout plane count already matches.
+    // The plane count comes from the actual FrameLayout rather than the
+    // fourcc→DecodedFormat table. The table now models P010 (2-plane
+    // semi-planar) and Y210 (single-plane packed) natively, but an imported
+    // dmabuf's layout stays authoritative: it is what the PRIME_2 layer
+    // descriptor and the per-plane size math (`get_single_plane_size`) index
+    // into. Behaviour-preserving for NV12/I420/etc., whose layout plane count
+    // already matches.
     fn num_planes(&self) -> usize {
         self.layout.planes.len()
     }
@@ -551,15 +550,15 @@ impl VideoFrame for GenericDmaVideoFrame {
             );
         }
 
-        // W-F1: 10-bit decode output. P010 is a 2-plane semi-planar surface (like
+        // P010 is a 2-plane semi-planar surface (like
         // NV12 but 16bpc) and Y210 is a single-plane packed 4:2:2-10 surface; both
         // are imported via PRIME_2 with the fourcc taken from `self.layout` below.
         // 12-bit (P012/Y212) and 4:4:4 (Y410/Y412) have no output wiring yet and
         // stay an explicit error.
         let rt_format = match self.decoded_format().unwrap() {
             DecodedFormat::I420 | DecodedFormat::NV12 => libva::VA_RT_FORMAT_YUV420,
-            DecodedFormat::I010 => libva::VA_RT_FORMAT_YUV420_10,
-            DecodedFormat::I210 => libva::VA_RT_FORMAT_YUV422_10,
+            DecodedFormat::P010 => libva::VA_RT_FORMAT_YUV420_10,
+            DecodedFormat::Y210 => libva::VA_RT_FORMAT_YUV422_10,
             _ => return Err("Format unsupported for VA-API export".to_string()),
         };
 
@@ -571,7 +570,7 @@ impl VideoFrame for GenericDmaVideoFrame {
                 self.resolution().height,
                 // TODO: Should we add USAGE_HINT_ENCODER support?
                 Some(UsageHint::USAGE_HINT_DECODER),
-                // W-F2: fallible dup — `EMFILE` here is an error, not a panic.
+                // A failed dup, including `EMFILE`, is an error rather than a panic.
                 vec![self.try_clone()?],
             )
             .map_err(|_| "Error importing GenericDmaVideoFrame to VA-API".to_string())?;

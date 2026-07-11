@@ -176,7 +176,7 @@ pub trait StatelessVideoDecoder {
     /// this will be equal to the length of `bitstream`, but some codecs may only do partial
     /// processing if e.g. several units are sent at the same time. It is the responsibility of the
     /// caller to check that all submitted input has been processed, and to resubmit the
-    /// unprocessed part if it hasn't. See the documentation of each codec for their expectations.
+    /// unprocessed part if it hasn't. Each codec defines its own expectations.
     fn decode(
         &mut self,
         timestamp: u64,

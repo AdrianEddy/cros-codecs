@@ -198,6 +198,10 @@ where
     Backend: StatefulVideoEncoderBackend<Handle>,
 {
     fn tune(&mut self, tunings: Tunings) -> EncodeResult<()> {
+        // Reject invariant-violating rate-control parameters (e.g. a VBR peak
+        // below the average) at the tuning boundary, before any frame is
+        // queued against them.
+        tunings.rate_control.validate()?;
         self.tunings = tunings;
         Ok(())
     }

@@ -452,7 +452,7 @@ impl<V: VideoFrame> StatelessEncoder<V, VaapiBackend<V::MemDescriptor, Surface<V
             _ => return Err(StatelessBackendError::UnsupportedProfile.into()),
         };
 
-        let bitrate_control = rate_control_to_va_rc(&config.initial_tunings.rate_control);
+        let bitrate_control = rate_control_to_va_rc(&config.initial_tunings.rate_control)?;
 
         let backend =
             VaapiBackend::new(display, va_profile, fourcc, coded_size, bitrate_control, low_power)?;

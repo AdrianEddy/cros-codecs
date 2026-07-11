@@ -134,7 +134,8 @@ pub trait VideoFrame: Send + Sync + Sized + Debug + 'static {
             | DecodedFormat::I212
             | DecodedFormat::I410
             | DecodedFormat::I412 => 3,
-            DecodedFormat::NV12 | DecodedFormat::MM21 => 2,
+            DecodedFormat::NV12 | DecodedFormat::MM21 | DecodedFormat::P010 => 2,
+            DecodedFormat::Y210 => 1,
         }
     }
 
@@ -152,14 +153,20 @@ pub trait VideoFrame: Send + Sync + Sized + Debug + 'static {
                     | DecodedFormat::I012
                     | DecodedFormat::I210
                     | DecodedFormat::I212
-                    | DecodedFormat::MM21 => {
+                    | DecodedFormat::MM21
+                    | DecodedFormat::P010 => {
                         if plane_idx == 0 {
                             1
                         } else {
                             2
                         }
                     }
-                    DecodedFormat::I444 | DecodedFormat::I410 | DecodedFormat::I412 => 1,
+                    // Y210's single packed plane covers the full width; the
+                    // 4:2:2 chroma packing is carried by bytes_per_element.
+                    DecodedFormat::I444
+                    | DecodedFormat::I410
+                    | DecodedFormat::I412
+                    | DecodedFormat::Y210 => 1,
                 });
             }
         }
@@ -177,7 +184,8 @@ pub trait VideoFrame: Send + Sync + Sized + Debug + 'static {
                     | DecodedFormat::NV12
                     | DecodedFormat::I010
                     | DecodedFormat::I012
-                    | DecodedFormat::MM21 => {
+                    | DecodedFormat::MM21
+                    | DecodedFormat::P010 => {
                         if plane_idx == 0 {
                             1
                         } else {
@@ -189,7 +197,8 @@ pub trait VideoFrame: Send + Sync + Sized + Debug + 'static {
                     | DecodedFormat::I210
                     | DecodedFormat::I212
                     | DecodedFormat::I410
-                    | DecodedFormat::I412 => 1,
+                    | DecodedFormat::I412
+                    | DecodedFormat::Y210 => 1,
                 })
             }
         }
@@ -217,6 +226,18 @@ pub trait VideoFrame: Send + Sync + Sized + Debug + 'static {
                             2
                         }
                     }
+                    // 16-bit semi-planar: a Y sample is 2 bytes, an interleaved
+                    // UV pair is 4.
+                    DecodedFormat::P010 => {
+                        if plane_idx == 0 {
+                            2
+                        } else {
+                            4
+                        }
+                    }
+                    // Packed Y0 U Y1 V at 16 bits per sample: 8 bytes per
+                    // 2-pixel group = 4 bytes per pixel.
+                    DecodedFormat::Y210 => 4,
                 })
             }
         }
@@ -308,4 +329,111 @@ impl<V: VideoFrame> PrimitiveBufferHandles for V4l2VideoFrame<V> {
     type HandleType = V::NativeHandle;
     const MEMORY_TYPE: Self::SupportedMemoryType =
         <V::NativeHandle as PlaneHandle>::Memory::MEMORY_TYPE;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Minimal host-only [`VideoFrame`]: just a fourcc and a resolution, enough
+    /// to exercise the default layout math (plane count, subsampling, bytes per
+    /// element) without any device.
+    #[derive(Debug)]
+    struct FakeFrame {
+        fourcc: Fourcc,
+        resolution: Resolution,
+    }
+
+    impl VideoFrame for FakeFrame {
+        #[cfg(feature = "v4l2")]
+        type NativeHandle = v4l2r::memory::MmapHandle;
+
+        #[cfg(feature = "vaapi")]
+        type MemDescriptor = ();
+        #[cfg(feature = "vaapi")]
+        type NativeHandle = Surface<()>;
+
+        fn fourcc(&self) -> Fourcc {
+            self.fourcc.clone()
+        }
+
+        fn resolution(&self) -> Resolution {
+            self.resolution.clone()
+        }
+
+        fn get_plane_size(&self) -> Vec<usize> {
+            unimplemented!()
+        }
+
+        fn get_plane_pitch(&self) -> Vec<usize> {
+            unimplemented!()
+        }
+
+        fn map<'a>(&'a self) -> Result<Box<dyn ReadMapping<'a> + 'a>, String> {
+            unimplemented!()
+        }
+
+        fn map_mut<'a>(&'a mut self) -> Result<Box<dyn WriteMapping<'a> + 'a>, String> {
+            unimplemented!()
+        }
+
+        #[cfg(feature = "v4l2")]
+        fn fill_v4l2_plane(&self, _index: usize, _plane: &mut v4l2_plane) {
+            unimplemented!()
+        }
+
+        #[cfg(feature = "v4l2")]
+        fn process_dqbuf(&mut self, _device: Arc<Device>, _format: &Format, _buf: &V4l2Buffer) {
+            unimplemented!()
+        }
+
+        #[cfg(feature = "vaapi")]
+        fn to_native_handle(&self, _display: &Rc<Display>) -> Result<Self::NativeHandle, String> {
+            unimplemented!()
+        }
+    }
+
+    fn fake(fourcc: &[u8; 4]) -> FakeFrame {
+        FakeFrame {
+            fourcc: Fourcc::from(fourcc),
+            resolution: Resolution { width: 320, height: 240 },
+        }
+    }
+
+    /// P010 is a two-plane semi-planar 4:2:0 format with 16-bit samples: a Y
+    /// plane of 2-byte elements and a half-height interleaved UV plane of
+    /// 4-byte pairs — not the three-plane layout of the planar I010.
+    #[test]
+    fn p010_layout_is_two_plane_semi_planar_16bit() {
+        let frame = fake(b"P010");
+        assert_eq!(frame.decoded_format().unwrap(), DecodedFormat::P010);
+        assert_eq!(frame.num_planes(), 2);
+        assert_eq!(frame.get_horizontal_subsampling(), vec![1, 2]);
+        assert_eq!(frame.get_vertical_subsampling(), vec![1, 2]);
+        assert_eq!(frame.get_bytes_per_element(), vec![2, 4]);
+    }
+
+    /// Y210 is a single packed 4:2:2 plane (Y0 U Y1 V at 16 bits per sample):
+    /// full-width rows at 4 bytes per pixel — not the three-plane layout of the
+    /// planar I210.
+    #[test]
+    fn y210_layout_is_single_packed_plane() {
+        let frame = fake(b"Y210");
+        assert_eq!(frame.decoded_format().unwrap(), DecodedFormat::Y210);
+        assert_eq!(frame.num_planes(), 1);
+        assert_eq!(frame.get_horizontal_subsampling(), vec![1]);
+        assert_eq!(frame.get_vertical_subsampling(), vec![1]);
+        assert_eq!(frame.get_bytes_per_element(), vec![4]);
+    }
+
+    /// The 8-bit formats keep their existing layout math.
+    #[test]
+    fn nv12_layout_unchanged() {
+        let frame = fake(b"NV12");
+        assert_eq!(frame.decoded_format().unwrap(), DecodedFormat::NV12);
+        assert_eq!(frame.num_planes(), 2);
+        assert_eq!(frame.get_horizontal_subsampling(), vec![1, 2]);
+        assert_eq!(frame.get_vertical_subsampling(), vec![1, 2]);
+        assert_eq!(frame.get_bytes_per_element(), vec![1, 2]);
+    }
 }

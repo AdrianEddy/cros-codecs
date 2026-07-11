@@ -11,9 +11,12 @@ use std::sync::Arc;
 
 use nix::sys::stat::fstat;
 use thiserror::Error;
+use v4l2r::bindings::v4l2_ext_control;
+use v4l2r::bindings::v4l2_ext_control__bindgen_ty_1;
 use v4l2r::bindings::v4l2_streamparm;
 use v4l2r::controls::codec::VideoBitrate;
 use v4l2r::controls::codec::VideoBitrateMode;
+use v4l2r::controls::codec::VideoBitratePeak;
 use v4l2r::controls::codec::VideoConstantQuality;
 use v4l2r::controls::codec::VideoForceKeyFrame;
 use v4l2r::controls::codec::VideoHeaderMode;
@@ -67,6 +70,7 @@ use crate::encoder::stateful::StatefulVideoEncoderBackend;
 use crate::encoder::CodedBitstreamBuffer;
 use crate::encoder::EncodeError;
 use crate::encoder::FrameMetadata;
+use crate::encoder::InvalidRateControlError;
 use crate::encoder::RateControl;
 use crate::encoder::Tunings;
 use crate::utils::DmabufFrame;
@@ -129,6 +133,9 @@ pub enum InitializationError {
 
     #[error(transparent)]
     Contro(#[from] ControlError),
+
+    #[error(transparent)]
+    RateControl(#[from] RateControlError),
 }
 
 #[derive(Debug, Error)]
@@ -140,6 +147,41 @@ pub struct ControlError {
 impl std::fmt::Display for ControlError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_fmt(format_args!("failed to set '{}': {:?}", self.which, self.error))
+    }
+}
+
+/// Error programming the device's rate-control state: invalid parameters, a
+/// value the control's `i32` payload cannot represent, or a control the
+/// selected rate-control mode requires but the device does not support.
+#[derive(Debug, Error)]
+pub enum RateControlError {
+    #[error(transparent)]
+    Control(#[from] ControlError),
+
+    #[error(transparent)]
+    InvalidRateControl(#[from] InvalidRateControlError),
+
+    #[error("rate-control value of '{which}' ({value}) exceeds the control's i32 range")]
+    OutOfRange { which: &'static str, value: u64 },
+}
+
+/// Converts a rate-control parameter to the `i32` payload of its V4L2 control,
+/// rejecting values the control cannot represent instead of wrapping.
+fn ctrl_i32(which: &'static str, value: u64) -> Result<i32, RateControlError> {
+    i32::try_from(value).map_err(|_| RateControlError::OutOfRange { which, value })
+}
+
+/// Builds a raw `v4l2_ext_control` carrying an `i32` payload for control `C`,
+/// so heterogeneous controls can be submitted together in one
+/// `VIDIOC_S_EXT_CTRLS` call.
+fn ext_ctrl<C>(value: i32) -> v4l2_ext_control
+where
+    C: ExtControlTrait<PAYLOAD = i32>,
+{
+    v4l2_ext_control {
+        id: C::ID,
+        __bindgen_anon_1: v4l2_ext_control__bindgen_ty_1 { value },
+        ..Default::default()
     }
 }
 
@@ -177,6 +219,9 @@ pub enum BackendError {
 
     #[error(transparent)]
     Control(#[from] ControlError),
+
+    #[error(transparent)]
+    RateControl(#[from] RateControlError),
 }
 
 pub type BackendResult<T> = std::result::Result<T, BackendError>;
@@ -509,34 +554,79 @@ where
         }
     }
 
+    /// Sets `controls` on the device in a single `VIDIOC_S_EXT_CTRLS` call: the
+    /// kernel validates and applies the whole cluster atomically, so a failure
+    /// leaves none of the values programmed. Unlike [`Self::apply_ctrl`], an
+    /// unsupported control is a hard error — callers use this for controls the
+    /// selected rate-control mode cannot work without.
+    fn require_ctrls(
+        device: &Device,
+        cluster: &'static str,
+        names: &[&'static str],
+        controls: &mut [v4l2_ext_control],
+    ) -> Result<(), ControlError> {
+        debug_assert_eq!(names.len(), controls.len());
+
+        match ioctl::s_ext_ctrls(device, ioctl::CtrlWhich::Current, &mut *controls) {
+            Ok(()) => Ok(()),
+            Err(ioctl::ExtControlError { error_idx, error }) => {
+                // `error_idx` names the failing control; an index past the end
+                // means the whole cluster was rejected during validation.
+                let which = names.get(error_idx as usize).copied().unwrap_or(cluster);
+                log::error!("Failed to set '{cluster}' at '{which}': {error}");
+                Err(ControlError { which, error: error.into() })
+            }
+        }
+    }
+
     /// Sets the rate mode and bitrate params on the device.
+    ///
+    /// Runs at both backend construction ([`Self::create`]) and at every tuning
+    /// change ([`Self::handle_request`]), so both boundaries validate the
+    /// documented [`RateControl`] invariants before any control is written.
     fn apply_rate_control(
         device: &Device,
         framerate: u32,
         rate_control: &RateControl,
-    ) -> Result<(), ControlError> {
+    ) -> Result<(), RateControlError> {
+        rate_control.validate()?;
+
         Self::apply_parm(device, QueueType::VideoOutputMplane, framerate);
         Self::apply_parm(device, QueueType::VideoCaptureMplane, 1000);
 
-        Self::apply_ctrl(
-            device,
-            "bitrate mode",
-            match rate_control {
-                RateControl::ConstantBitrate(_) => VideoBitrateMode::ConstantBitrate,
-                // VBR (W-F3): V4L2's variable-bitrate mode. `bitrate_target()`
-                // reports the peak (`max_bitrate`), applied as the bitrate
-                // control below.
-                RateControl::VariableBitrate { .. } => VideoBitrateMode::VariableBitrate,
-                RateControl::ConstantQuality(_) => VideoBitrateMode::ConstantQuality,
-            },
-        )?;
-
-        if let Some(bitrate) = rate_control.bitrate_target() {
-            Self::apply_ctrl(device, "bitrate", VideoBitrate(bitrate as i32))?;
-        }
-
-        if let RateControl::ConstantQuality(qp) = rate_control {
-            Self::apply_ctrl(device, "constant quality", VideoConstantQuality(*qp as i32))?;
+        match rate_control {
+            RateControl::ConstantBitrate(target) => {
+                Self::apply_ctrl(device, "bitrate mode", VideoBitrateMode::ConstantBitrate)?;
+                // `V4L2_CID_MPEG_VIDEO_BITRATE` is the average bitrate, which
+                // for CBR is also the single target.
+                let bitrate = ctrl_i32("bitrate", *target)?;
+                Self::apply_ctrl(device, "bitrate", VideoBitrate(bitrate))?;
+            }
+            RateControl::VariableBitrate { avg_bitrate, max_bitrate } => {
+                // V4L2 defines `V4L2_CID_MPEG_VIDEO_BITRATE` as the *average*
+                // bitrate and `V4L2_CID_MPEG_VIDEO_BITRATE_PEAK` as the *peak*;
+                // program each with its own value, together with the mode, in
+                // one atomic call. VBR is rejected — not silently degraded to a
+                // different rate profile — when the device lacks the mode or
+                // either control.
+                let avg = ctrl_i32("bitrate", *avg_bitrate)?;
+                let peak = ctrl_i32("peak bitrate", *max_bitrate)?;
+                Self::require_ctrls(
+                    device,
+                    "VBR bitrate cluster",
+                    &["bitrate mode", "bitrate", "peak bitrate"],
+                    &mut [
+                        ext_ctrl::<VideoBitrateMode>(VideoBitrateMode::VariableBitrate.into()),
+                        ext_ctrl::<VideoBitrate>(avg),
+                        ext_ctrl::<VideoBitratePeak>(peak),
+                    ],
+                )?;
+            }
+            RateControl::ConstantQuality(qp) => {
+                Self::apply_ctrl(device, "bitrate mode", VideoBitrateMode::ConstantQuality)?;
+                let qp = ctrl_i32("constant quality", u64::from(*qp))?;
+                Self::apply_ctrl(device, "constant quality", VideoConstantQuality(qp))?;
+            }
         }
 
         Ok(())
@@ -607,10 +697,14 @@ where
         // Default coded buffer size if bitrate control is not used.
         const DEFAULT_CODED_SIZE: u32 = 1_500_000;
 
+        // Saturate instead of wrapping: a target near/above u32::MAX only means
+        // "as large a coded buffer as expressible", not a tiny wrapped one.
         let coded_buffer_size = tunings
             .rate_control
             .bitrate_target()
-            .map(|e| e as u32 * CODED_SIZE_MUL)
+            .map(|e| {
+                u32::try_from(e.saturating_mul(u64::from(CODED_SIZE_MUL))).unwrap_or(u32::MAX)
+            })
             .unwrap_or(DEFAULT_CODED_SIZE);
 
         let capture_format = Format {
@@ -1006,6 +1100,43 @@ pub(crate) mod tests {
     use crate::encoder::tests::fill_test_frame_nm12;
     use crate::encoder::tests::fill_test_frame_nv12;
     use crate::encoder::tests::get_test_frame_t;
+
+    /// `u64` rate-control parameters must not wrap when narrowed to the `i32`
+    /// control payload.
+    #[test]
+    fn ctrl_i32_rejects_values_beyond_i32() {
+        assert_eq!(ctrl_i32("bitrate", 4_000_000).unwrap(), 4_000_000);
+        assert_eq!(ctrl_i32("bitrate", i32::MAX as u64).unwrap(), i32::MAX);
+        assert!(matches!(
+            ctrl_i32("bitrate", i32::MAX as u64 + 1),
+            Err(RateControlError::OutOfRange { which: "bitrate", value })
+                if value == i32::MAX as u64 + 1
+        ));
+        assert!(ctrl_i32("peak bitrate", u64::MAX).is_err());
+    }
+
+    /// The VBR cluster programs the V4L2 *average* (`V4L2_CID_MPEG_VIDEO_BITRATE`)
+    /// and *peak* (`V4L2_CID_MPEG_VIDEO_BITRATE_PEAK`) controls with their own
+    /// values — the peak must not ride the average control.
+    #[test]
+    fn vbr_cluster_routes_avg_and_peak_to_distinct_controls() {
+        let mode = ext_ctrl::<VideoBitrateMode>(VideoBitrateMode::VariableBitrate.into());
+        let avg = ext_ctrl::<VideoBitrate>(4_000_000);
+        let peak = ext_ctrl::<VideoBitratePeak>(8_000_000);
+
+        // Copy the fields out: `v4l2_ext_control` is packed, so referencing
+        // them in-place (as assert_eq! would) is UB.
+        let (mode_id, avg_id, peak_id) = (mode.id, avg.id, peak.id);
+        assert_eq!(mode_id, v4l2r::bindings::V4L2_CID_MPEG_VIDEO_BITRATE_MODE);
+        assert_eq!(avg_id, v4l2r::bindings::V4L2_CID_MPEG_VIDEO_BITRATE);
+        assert_eq!(peak_id, v4l2r::bindings::V4L2_CID_MPEG_VIDEO_BITRATE_PEAK);
+
+        // SAFETY: both controls were built with an i32 payload.
+        let (avg_value, peak_value) =
+            unsafe { (avg.__bindgen_anon_1.value, peak.__bindgen_anon_1.value) };
+        assert_eq!(avg_value, 4_000_000);
+        assert_eq!(peak_value, 8_000_000);
+    }
 
     /// A simple wrapper for a GBM device node.
     pub struct GbmDevice(std::fs::File);

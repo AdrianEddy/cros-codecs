@@ -166,6 +166,10 @@ where
             return Err(EncodeError::Unsupported);
         }
 
+        // Reject invariant-violating parameters (e.g. VBR peak below average)
+        // before the tunings are queued for the backend.
+        tunings.rate_control.validate()?;
+
         // Check if the tunings are or will be the same, in such case we skip.
         let skip = match self.tunings_queue.front() {
             Some((_, preceeding_tunnings)) if preceeding_tunnings == &tunings => true,

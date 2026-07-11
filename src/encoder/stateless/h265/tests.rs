@@ -3,8 +3,9 @@
 // found in the LICENSE file.
 
 //! Host (GPU-independent) unit tests for the HEVC encoder: the packed-header
-//! attribute decision (iHD-packed vs Mesa-none), and the predictor's VPS / SPS /
-//! PPS / slice-header field selection round-tripped through the M7b synthesizer.
+//! attribute decision between application-packed and driver-generated headers,
+//! and the predictor's VPS / SPS /
+//! PPS / slice-header field selection round-tripped through the synthesizer.
 
 use std::io::Cursor;
 use std::rc::Rc;
@@ -108,7 +109,7 @@ fn next_nalu(buf: &[u8], expect: NaluType) -> Nalu<'_, NaluHeader> {
 }
 
 // ─────────────────────────────────────────────────────────────────────
-// Packed-header decision (§3) — iHD packs all three, Mesa packs none.
+// Packed-header decision: either all three header types are packed or none are.
 // ─────────────────────────────────────────────────────────────────────
 
 #[test]
@@ -116,14 +117,14 @@ fn packed_headers_ihd_all_three() {
     let all = libva::VA_ENC_PACKED_HEADER_SEQUENCE
         | libva::VA_ENC_PACKED_HEADER_PICTURE
         | libva::VA_ENC_PACKED_HEADER_SLICE;
-    // iHD advertises all three (possibly with extra bits) → app packs all three.
+    // Advertising all three, possibly with extra bits, enables all three.
     assert_eq!(decide_packed_headers(all), all);
     assert_eq!(decide_packed_headers(all | libva::VA_ENC_PACKED_HEADER_MISC), all);
 }
 
 #[test]
 fn packed_headers_mesa_none() {
-    // Mesa advertises the attribute as unsupported → the driver self-generates.
+    // An unsupported attribute means the driver self-generates the headers.
     assert_eq!(decide_packed_headers(libva::VA_ATTRIB_NOT_SUPPORTED), libva::VA_ENC_PACKED_HEADER_NONE);
     // A bare NONE value likewise.
     assert_eq!(decide_packed_headers(libva::VA_ENC_PACKED_HEADER_NONE), libva::VA_ENC_PACKED_HEADER_NONE);
@@ -237,7 +238,7 @@ fn predictor_pps_round_trips() {
 }
 
 // ─────────────────────────────────────────────────────────────────────
-// M8a: Main10 (10-bit 4:2:0) and Main 4:2:2 10 SPS field selection +
+// Main10 (10-bit 4:2:0) and Main 4:2:2 10 SPS field selection and
 // VUI CICP colour — all round-tripped through the synthesizer/parser.
 // ─────────────────────────────────────────────────────────────────────
 
@@ -265,7 +266,7 @@ fn predictor_sps_main10_420_10bit() {
 #[test]
 fn predictor_sps_main422_10_422_10bit() {
     // Main 4:2:2 10 is signalled as RExt (general_profile_idc == 4) with the
-    // Table A.2/A.3 constraint flags; chroma_format_idc == 2, 10-bit.
+    // Constraint flags for chroma_format_idc == 2 at 10-bit depth.
     let cfg = config_profile(1920, 1080, 60, Profile::RangeExtensions, None);
     let (_vps, sps, _pps) = build_parameter_sets(&cfg, &Tunings::default(), 60);
 

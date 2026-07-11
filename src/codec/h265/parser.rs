@@ -2453,7 +2453,7 @@ impl Parser {
         }
 
         for i in 0..sps_max_sub_layers_minus_1 as usize {
-            // §7.3.3: the sub-layer profile block gates on
+            // The sub-layer profile block gates on
             // sub_layer_profile_present_flag[i]; the level field below gates on
             // sub_layer_level_present_flag[i].
             if ptl.sub_layer_profile_present_flag[i] {
@@ -2889,7 +2889,7 @@ impl Parser {
             if !hrd.fixed_pic_rate_general_flag[i] {
                 hrd.fixed_pic_rate_within_cvs_flag[i] = r.read_bit()?;
             } else {
-                // §E.2.2: when fixed_pic_rate_general_flag[i] == 1,
+                // When fixed_pic_rate_general_flag[i] == 1,
                 // fixed_pic_rate_within_cvs_flag[i] is inferred to be 1.
                 hrd.fixed_pic_rate_within_cvs_flag[i] = true;
             }
@@ -3639,7 +3639,7 @@ impl Parser {
                 pwt.luma_weight_l1_flag[i] = r.read_bit()?;
             }
 
-            // §7.3.6.3: the L1 chroma_weight flag loop gates on ChromaArrayType,
+            // The L1 chroma_weight flag loop gates on ChromaArrayType,
             // matching the L0 loop above (not chroma_format_idc — they differ
             // when separate_colour_plane_flag == 1).
             if sps.chroma_array_type != 0 {

@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! Host (GPU-independent) unit tests for the H.264 encoder's **W-F5** colour
+//! Host (GPU-independent) unit tests for the H.264 encoder's colour
 //! threading: the predictor writes the caller's CICP colour description into the
 //! SPS VUI (`video_signal_type` + `colour_description`), round-tripped through
 //! the synthesizer and the parser.
@@ -75,8 +75,7 @@ fn parse_sps(buf: &[u8]) -> Rc<Sps> {
 
 #[test]
 fn no_colour_leaves_video_signal_type_absent() {
-    // The M5 behaviour: a VUI exists (aspect ratio + timing) but carries no
-    // colour block — byte-identical to before W-F5.
+    // A VUI exists (aspect ratio and timing) but carries no colour block.
     let sps = keyframe_sps(None);
     let parsed = parse_sps(&synth_sps(&sps));
     assert!(parsed.vui_parameters_present_flag, "VUI present (aspect ratio + timing)");

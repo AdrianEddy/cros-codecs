@@ -64,7 +64,7 @@ impl From<NaluWriterError> for SynthesizerError {
 
 pub type SynthesizerResult<T> = Result<T, SynthesizerError>;
 
-/// Extended Sample Aspect Ratio - H.265 Table E-1.
+/// Extended sample aspect ratio value.
 const EXTENDED_SAR: u32 = 255;
 
 /// A helper to output typed HEVC NALUs to [`std::io::Write`] using [`NaluWriter`].
@@ -127,7 +127,7 @@ impl<N: private::NaluStruct, W: Write> Synthesizer<'_, N, W> {
         Ok(())
     }
 
-    /// `profile_tier_level()` — H.265 7.3.3.
+    /// Writes `profile_tier_level()`.
     fn profile_tier_level(
         &mut self,
         ptl: &ProfileTierLevel,
@@ -198,7 +198,7 @@ impl<N: private::NaluStruct, W: Write> Synthesizer<'_, N, W> {
         }
 
         for i in 0..max_sub_layers_minus1 as usize {
-            // §7.3.3: the sub-layer profile block gates on
+            // The sub-layer profile block gates on
             // sub_layer_profile_present_flag[i]; the level field below gates on
             // sub_layer_level_present_flag[i].
             if ptl.sub_layer_profile_present_flag[i] {
@@ -255,7 +255,7 @@ impl<N: private::NaluStruct, W: Write> Synthesizer<'_, N, W> {
         Ok(())
     }
 
-    /// `scaling_list_data()` — H.265 7.3.4. Always emitted in explicit form
+    /// Writes `scaling_list_data()` in explicit form
     /// (`scaling_list_pred_mode_flag == 1`), which round-trips any coefficient
     /// set through the parser.
     fn scaling_list_data(&mut self, sl: &ScalingLists) -> SynthesizerResult<()> {
@@ -301,7 +301,7 @@ impl<N: private::NaluStruct, W: Write> Synthesizer<'_, N, W> {
         Ok(())
     }
 
-    /// `st_ref_pic_set( stRpsIdx )` — H.265 7.3.7. Always emitted in explicit
+    /// Writes `st_ref_pic_set(stRpsIdx)` in explicit
     /// form (`inter_ref_pic_set_prediction_flag == 0`); the LowDelay-IPPP
     /// encoder never uses inter-RPS prediction.
     fn short_term_ref_pic_set(
@@ -344,7 +344,7 @@ impl<N: private::NaluStruct, W: Write> Synthesizer<'_, N, W> {
         Ok(())
     }
 
-    /// `sub_layer_hrd_parameters( subLayerId )` — H.265 E.2.3.
+    /// Writes `sub_layer_hrd_parameters(subLayerId)`.
     fn sublayer_hrd_parameters(
         &mut self,
         h: &SublayerHrdParameters,
@@ -365,7 +365,7 @@ impl<N: private::NaluStruct, W: Write> Synthesizer<'_, N, W> {
     }
 
     /// `hrd_parameters( commonInfPresentFlag, maxNumSubLayersMinus1 )` —
-    /// H.265 E.2.2.
+    /// Writes HRD parameters.
     fn hrd_parameters(
         &mut self,
         hrd: &HrdParams,
@@ -396,7 +396,7 @@ impl<N: private::NaluStruct, W: Write> Synthesizer<'_, N, W> {
 
         for i in 0..=max_num_sublayers_minus1 as usize {
             self.u(1, hrd.fixed_pic_rate_general_flag[i])?;
-            // §E.2.2: fixed_pic_rate_within_cvs_flag[i] is only coded when
+            // fixed_pic_rate_within_cvs_flag[i] is only coded when
             // fixed_pic_rate_general_flag[i] == 0; when general == 1 it is
             // inferred to be 1, and the branch below uses the inferred value.
             let within_cvs = if !hrd.fixed_pic_rate_general_flag[i] {
@@ -432,7 +432,7 @@ impl<N: private::NaluStruct, W: Write> Synthesizer<'_, N, W> {
         Ok(())
     }
 
-    /// `vui_parameters()` — H.265 E.2.1.
+    /// Writes `vui_parameters()`.
     fn vui_parameters(
         &mut self,
         vui: &VuiParams,
@@ -510,7 +510,7 @@ impl<N: private::NaluStruct, W: Write> Synthesizer<'_, N, W> {
         Ok(())
     }
 
-    /// `sps_range_extension()` — H.265 7.3.2.2.2.
+    /// Writes `sps_range_extension()`.
     fn sps_range_extension(&mut self, ext: &SpsRangeExtension) -> SynthesizerResult<()> {
         self.u(1, ext.transform_skip_rotation_enabled_flag)?;
         self.u(1, ext.transform_skip_context_enabled_flag)?;
@@ -536,7 +536,7 @@ impl<'n, W: Write> Synthesizer<'n, Vps, W> {
         s.rbsp_trailing_bits()
     }
 
-    /// `video_parameter_set_rbsp()` — H.265 7.3.2.1.
+    /// Writes `video_parameter_set_rbsp()`.
     fn video_parameter_set_rbsp(&mut self) -> SynthesizerResult<()> {
         let vps = self.nalu;
 
@@ -609,7 +609,7 @@ impl<'n, W: Write> Synthesizer<'n, Sps, W> {
         s.rbsp_trailing_bits()
     }
 
-    /// `seq_parameter_set_rbsp()` — H.265 7.3.2.2.
+    /// Writes `seq_parameter_set_rbsp()`.
     fn seq_parameter_set_rbsp(&mut self) -> SynthesizerResult<()> {
         let sps = self.nalu;
 
@@ -735,7 +735,7 @@ impl<'n, W: Write> Synthesizer<'n, Pps, W> {
         s.rbsp_trailing_bits()
     }
 
-    /// `pps_range_extension()` — H.265 7.3.2.3.2.
+    /// Writes `pps_range_extension()`.
     fn pps_range_extension(
         &mut self,
         ext: &PpsRangeExtension,
@@ -759,7 +759,7 @@ impl<'n, W: Write> Synthesizer<'n, Pps, W> {
         Ok(())
     }
 
-    /// `pic_parameter_set_rbsp()` — H.265 7.3.2.3.1.
+    /// Writes `pic_parameter_set_rbsp()`.
     fn pic_parameter_set_rbsp(&mut self) -> SynthesizerResult<()> {
         let pps = self.nalu;
 
@@ -866,7 +866,7 @@ impl<'n, W: Write> Synthesizer<'n, SliceHeader, W> {
         s.rbsp_trailing_bits()
     }
 
-    /// `ref_pic_lists_modification()` — H.265 7.3.6.2.
+    /// Writes `ref_pic_lists_modification()`.
     fn ref_pic_lists_modification(
         &mut self,
         rplm: &RefPicListModification,
@@ -896,7 +896,7 @@ impl<'n, W: Write> Synthesizer<'n, SliceHeader, W> {
         Ok(())
     }
 
-    /// `pred_weight_table()` — H.265 7.3.6.3.
+    /// Writes `pred_weight_table()`.
     fn pred_weight_table(
         &mut self,
         pwt: &PredWeightTable,
@@ -936,7 +936,7 @@ impl<'n, W: Write> Synthesizer<'n, SliceHeader, W> {
             for i in 0..=num_ref_idx_l1_active_minus1 as usize {
                 self.u(1, pwt.luma_weight_l1_flag[i])?;
             }
-            // §7.3.6.3: the L1 chroma_weight flag loop gates on ChromaArrayType,
+            // The L1 chroma_weight flag loop gates on ChromaArrayType,
             // matching the L0 loop above (not chroma_format_idc — they differ
             // when separate_colour_plane_flag == 1).
             if chroma_array_type != 0 {
@@ -962,7 +962,7 @@ impl<'n, W: Write> Synthesizer<'n, SliceHeader, W> {
         Ok(())
     }
 
-    /// `slice_segment_header()` — H.265 7.3.6.1.
+    /// Writes `slice_segment_header()`.
     fn slice_segment_header(
         &mut self,
         nalu_type: NaluType,
@@ -1565,7 +1565,7 @@ mod tests {
         assert_eq!(parsed1.vui_parameters.num_units_in_tick, 1000);
         assert_eq!(parsed1.vui_parameters.time_scale, 60000);
         assert!(parsed1.vui_parameters.hrd_parameters_present_flag);
-        // §E.2.2: fixed_pic_rate_general_flag == 1 is a spec-compliant HRD in
+        // fixed_pic_rate_general_flag == 1 is a valid HRD configuration in
         // which fixed_pic_rate_within_cvs_flag is not coded but inferred to 1.
         assert!(parsed1.vui_parameters.hrd.fixed_pic_rate_general_flag[0]);
         assert!(
@@ -1751,7 +1751,7 @@ mod tests {
     }
 
     /// Finding 5 — the sub-layer PTL profile block gates on
-    /// `sub_layer_profile_present_flag[i]` (§7.3.3), not the level-present flag.
+    /// `sub_layer_profile_present_flag[i]`, not the level-present flag.
     /// Drives the case `profile_present = true, level_present = false`, in which
     /// the two gates disagree: only the corrected gate writes/reads the profile
     /// block, so `sub_layer_profile_idc[0]` survives the round-trip.
@@ -1886,7 +1886,7 @@ mod tests {
     }
 
     /// Finding 4 — the L1 `chroma_weight` flag loop gates on ChromaArrayType
-    /// (§7.3.6.3), matching L0. Drives a weighted-bipred B slice with
+    /// matching L0. Drives a weighted-bipred B slice with
     /// `separate_colour_plane_flag = 1` (chroma_format_idc = 3, ChromaArrayType
     /// = 0), the one config where the two gates disagree: the L1 chroma flags
     /// must be absent. A one-sided revert to `chroma_format_idc` on either the

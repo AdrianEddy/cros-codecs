@@ -21,7 +21,7 @@ pub struct EncoderConfig {
     pub initial_tunings: Tunings,
     /// Optional CICP colour description threaded into the sequence header OBU
     /// `color_config` (color_primaries/transfer/matrix + color_range). `None` ⇒
-    /// `color_description_present_flag == 0` (byte-identical to the M6 encoder).
+    /// `color_description_present_flag == 0`.
     pub color: Option<EncoderColorInfo>,
 }
 

@@ -32,8 +32,10 @@ pub enum RateControl {
     /// `bits_per_second` and derives the average from
     /// `target_percentage = avg_bitrate * 100 / max_bitrate` (VA computes
     /// `target = bits_per_second * target_percentage / 100`, per
-    /// `VAEncMiscParameterRateControl` in va.h). Requires
-    /// `max_bitrate >= avg_bitrate > 0` (validated by the caller).
+    /// `VAEncMiscParameterRateControl`). On V4L2 the average programs
+    /// `V4L2_CID_MPEG_VIDEO_BITRATE` and the peak `V4L2_CID_MPEG_VIDEO_BITRATE_PEAK`.
+    /// Requires `max_bitrate >= avg_bitrate > 0`, enforced by
+    /// [`RateControl::validate`] at construction and tuning boundaries.
     VariableBitrate { avg_bitrate: u64, max_bitrate: u64 },
 
     /// The encoder shall maintain codec specific quality parameter constant (eg. QP for H.264)
@@ -41,10 +43,42 @@ pub enum RateControl {
     ConstantQuality(u32),
 }
 
+/// Error returned when a [`RateControl`]'s parameters violate the variant's
+/// documented invariants (e.g. VBR requires `max_bitrate >= avg_bitrate > 0`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InvalidRateControlError(&'static str);
+
+impl fmt::Display for InvalidRateControlError {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "invalid rate control parameters: {}", self.0)
+    }
+}
+
+impl std::error::Error for InvalidRateControlError {}
+
 impl RateControl {
     #[allow(dead_code)]
     pub(crate) fn is_same_variant(left: &Self, right: &Self) -> bool {
         std::mem::discriminant(left) == std::mem::discriminant(right)
+    }
+
+    /// Checks the variant's documented parameter invariants:
+    /// [`RateControl::VariableBitrate`] requires `max_bitrate >= avg_bitrate > 0`.
+    /// Backends call this at construction and at every tuning boundary, before
+    /// any device state is touched.
+    pub fn validate(&self) -> Result<(), InvalidRateControlError> {
+        match self {
+            RateControl::VariableBitrate { avg_bitrate, max_bitrate } => {
+                if *avg_bitrate == 0 {
+                    Err(InvalidRateControlError("VBR requires avg_bitrate > 0"))
+                } else if max_bitrate < avg_bitrate {
+                    Err(InvalidRateControlError("VBR requires max_bitrate >= avg_bitrate"))
+                } else {
+                    Ok(())
+                }
+            }
+            RateControl::ConstantBitrate(_) | RateControl::ConstantQuality(_) => Ok(()),
+        }
     }
 
     pub(crate) fn bitrate_target(&self) -> Option<u64> {
@@ -93,7 +127,7 @@ impl Default for Tunings {
     }
 }
 
-/// Sequence-level colour description (CICP / ITU-T H.273) an encoder writes into
+/// Sequence-level CICP colour description an encoder writes into
 /// the coded bitstream so a decoder can reproduce the intended colour volume.
 ///
 /// The three code points are the CICP identifiers shared by every codec's
@@ -104,15 +138,15 @@ impl Default for Tunings {
 /// and chroma.
 ///
 /// This is the codec-neutral carrier a caller threads through an
-/// `EncoderConfig` (`None` ⇒ no colour signalled, the pre-M8 behaviour).
+/// `EncoderConfig` (`None` means no colour information is signalled).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct EncoderColorInfo {
-    /// CICP colour primaries (`ColourPrimaries`, H.273 Table 2). `2` = Unspecified.
+    /// CICP colour primaries (`ColourPrimaries`). `2` means unspecified.
     pub primaries: u8,
-    /// CICP transfer characteristics (`TransferCharacteristics`, H.273 Table 3).
+    /// CICP transfer characteristics (`TransferCharacteristics`).
     /// `2` = Unspecified.
     pub transfer: u8,
-    /// CICP matrix coefficients (`MatrixCoefficients`, H.273 Table 4).
+    /// CICP matrix coefficients (`MatrixCoefficients`).
     /// `2` = Unspecified.
     pub matrix: u8,
     /// Full-range (`1`) vs limited/studio-range (`0`) luma & chroma.
@@ -152,6 +186,7 @@ impl From<CodedBitstreamBuffer> for Vec<u8> {
 pub enum EncodeError {
     Unsupported,
     InvalidInternalState,
+    InvalidTunings(InvalidRateControlError),
     StatelessBackendError(StatelessBackendError),
     StatefulBackendError(StatefulBackendError),
     H264SynthesizerError(H264SynthesizerError),
@@ -166,12 +201,19 @@ impl fmt::Display for EncodeError {
             EncodeError::InvalidInternalState => {
                 write!(f, "invalid internal state. This is likely a bug.")
             }
+            EncodeError::InvalidTunings(x) => write!(f, "invalid tunings: {}", x),
             EncodeError::StatelessBackendError(x) => write!(f, "{}", x.to_string()),
             EncodeError::StatefulBackendError(x) => write!(f, "{}", x.to_string()),
             EncodeError::H264SynthesizerError(x) => write!(f, "{}", x.to_string()),
             EncodeError::H265SynthesizerError(x) => write!(f, "{}", x.to_string()),
             EncodeError::AV1SynthesizerError(x) => write!(f, "{}", x.to_string()),
         }
+    }
+}
+
+impl From<InvalidRateControlError> for EncodeError {
+    fn from(err: InvalidRateControlError) -> Self {
+        EncodeError::InvalidTunings(err)
     }
 }
 
@@ -262,6 +304,8 @@ pub fn simple_encode_loop<H>(
 
 #[cfg(test)]
 pub(crate) mod tests {
+    use super::RateControl;
+
     #[cfg(feature = "v4l2")]
     use crate::encoder::FrameMetadata;
     #[cfg(feature = "v4l2")]
@@ -270,6 +314,36 @@ pub(crate) mod tests {
     use crate::Fourcc;
     #[cfg(feature = "v4l2")]
     use crate::FrameLayout;
+
+    /// The `max_bitrate >= avg_bitrate > 0` invariant documented on
+    /// [`RateControl::VariableBitrate`] is enforced by [`RateControl::validate`],
+    /// which every backend runs at construction and tuning boundaries.
+    #[test]
+    fn rate_control_validate_enforces_vbr_invariants() {
+        // Valid: peak above average, peak equal to average (CBR-like).
+        assert!(RateControl::VariableBitrate { avg_bitrate: 4_000_000, max_bitrate: 8_000_000 }
+            .validate()
+            .is_ok());
+        assert!(RateControl::VariableBitrate { avg_bitrate: 8_000_000, max_bitrate: 8_000_000 }
+            .validate()
+            .is_ok());
+
+        // Invalid: zero average, peak below average.
+        assert!(RateControl::VariableBitrate { avg_bitrate: 0, max_bitrate: 8_000_000 }
+            .validate()
+            .is_err());
+        assert!(RateControl::VariableBitrate { avg_bitrate: 0, max_bitrate: 0 }
+            .validate()
+            .is_err());
+        assert!(RateControl::VariableBitrate { avg_bitrate: 8_000_000, max_bitrate: 4_000_000 }
+            .validate()
+            .is_err());
+
+        // CBR / CQP carry no cross-parameter invariant.
+        assert!(RateControl::ConstantBitrate(0).validate().is_ok());
+        assert!(RateControl::ConstantBitrate(5_000_000).validate().is_ok());
+        assert!(RateControl::ConstantQuality(26).validate().is_ok());
+    }
 
     pub fn get_test_frame_t(ts: u64, max_ts: u64) -> f32 {
         2.0 * std::f32::consts::PI * (ts as f32) / (max_ts as f32)

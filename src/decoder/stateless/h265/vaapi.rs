@@ -114,15 +114,15 @@ impl VaStreamInfo for &Sps {
 
         let chroma_format_idc = self.chroma_format_idc;
 
-        // W-F10(a): The Range Extensions / High Throughput profiles and the base
+        // The Range Extensions / High Throughput profiles and the base
         // Main family all select the VA profile purely by (bit depth,
         // chroma_format_idc). A conformant e.g. Main 4:2:2 10 stream signals
         // `general_profile_idc = 4` (RangeExtensions), which previously fell
         // through to an `unimplemented!()` panic. This closure maps the format
         // pair to the VA profile for both `general_profile_idc` and
-        // `general_profile_compatibility_flag`-matched streams (HEVC Annex A).
+        // `general_profile_compatibility_flag`-matched streams.
         // Whether the mapped profile has zero-copy *output* wiring is enforced
-        // separately in `VaapiBackend::new_sequence` (W-F1) — 12-bit and 4:4:4
+        // separately in `VaapiBackend::new_sequence`; 12-bit and 4:4:4
         // profiles map here but are rejected with an explicit error there.
         let map_main_family = |bit_depth: u8, chroma: u8| -> anyhow::Result<i32> {
             match (bit_depth, chroma) {
@@ -149,7 +149,7 @@ impl VaStreamInfo for &Sps {
             | Profile::RangeExtensions
             | Profile::HighThroughput => map_main_family(bit_depth, chroma_format_idc),
 
-            // See table A.4 (Annex H scalable extensions).
+            // Scalable-extension profiles use the base profile indicated here.
             Profile::ScalableMain => match (bit_depth, chroma_format_idc) {
                 (8, 1) => Ok(libva::VAProfile::VAProfileHEVCSccMain),
                 (8, 3) => Ok(libva::VAProfile::VAProfileHEVCSccMain444),
@@ -165,7 +165,7 @@ impl VaStreamInfo for &Sps {
             // Other profile_idc values (Multiview, 3D, Screen Content, scalable
             // RExt, …) have no direct VA profile, but a conformant stream may
             // still decode as a base profile via
-            // general_profile_compatibility_flag (HEVC Annex A). Fall back to the
+            // general_profile_compatibility_flag. Fall back to the
             // Main-family mapping when a Main / Main10 / MainStill / RExt / HT
             // compatibility flag is set; otherwise return an explicit error —
             // never the old `unimplemented!()` panic.
@@ -465,7 +465,7 @@ fn build_pic_param<V: VideoFrame>(
         pps.loop_filter_across_slices_enabled_flag as u32,
         pps.loop_filter_across_tiles_enabled_flag as u32,
         sps.pcm_loop_filter_disabled_flag as u32,
-        /* lets follow the FFMPEG and GStreamer train and set these to false */
+        /* Disable these optional fields because they are not populated here. */
         0,
         0,
     );

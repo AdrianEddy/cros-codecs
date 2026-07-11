@@ -109,7 +109,7 @@ where
         let hierarchical_flag = 0;
 
         // CBR bitrate target for the sequence header (0 ⇒ the driver ignores
-        // it, e.g. under CQP). Mirrors the VP9/H.264 encoders (W-F4).
+        // it, e.g. under CQP). This matches the VP9/H.264 encoders.
         let bits_per_second = request.tunings.rate_control.bitrate_target().unwrap_or(0) as u32;
 
         // AV1 5.5.2
@@ -510,7 +510,7 @@ where
         let tg_param =
             libva::BufferType::EncSliceParameter(libva::EncSliceParameter::AV1(tg_param));
 
-        // Rate-control + framerate misc params (W-F4). Required for CBR (they
+        // Rate-control and framerate miscellaneous parameters. Required for CBR (they
         // carry the bitrate target + QP clamps and let the driver's rate
         // controller size per-frame budgets); benign under CQP (bits_per_second
         // is 0 and the driver drives QP from the picture param's base_q_idx) —
@@ -575,12 +575,12 @@ impl<V: VideoFrame>
             _ => return Err(StatelessBackendError::UnsupportedProfile.into()),
         };
 
-        // Rate-control mode → libva RC. CQP has always worked; CBR (W-F4) and
-        // VBR (W-F3) are wired through the shared `rate_control_to_va_rc` map —
+        // Map the rate-control mode to libva RC. CQP, CBR, and VBR are wired
+        // through the shared `rate_control_to_va_rc` map;
         // the drivers support them, only this ctor once gated them out by
         // returning `Unsupported` and hardcoding `VA_RC_CQP`. The per-frame RC +
         // framerate misc params are submitted in `encode_tile_group`.
-        let bitrate_control = rate_control_to_va_rc(&config.initial_tunings.rate_control);
+        let bitrate_control = rate_control_to_va_rc(&config.initial_tunings.rate_control)?;
 
         let backend = VaapiBackend::new(
             display,

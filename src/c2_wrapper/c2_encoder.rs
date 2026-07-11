@@ -228,7 +228,7 @@ where
 
                 let curr_bitrate = match self.current_tunings.rate_control {
                     ConstantBitrate(bitrate) => bitrate,
-                    // VBR (W-F3): compare against the peak (`max_bitrate`), the
+                    // For VBR, compare against the peak (`max_bitrate`), the
                     // value `bitrate_target()` reports. The dynamic re-tune below
                     // is CBR-only (as it already was), so a VBR stream is treated
                     // like its peak here.

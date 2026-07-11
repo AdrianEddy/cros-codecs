@@ -31,6 +31,7 @@ use crate::encoder::stateless::StatelessBackendError;
 use crate::encoder::stateless::StatelessBackendResult;
 use crate::encoder::stateless::StatelessEncoderBackendImport;
 use crate::encoder::FrameMetadata;
+use crate::encoder::InvalidRateControlError;
 use crate::encoder::RateControl;
 use crate::encoder::Tunings;
 use crate::video_frame::VideoFrame;
@@ -50,9 +51,8 @@ impl From<libva::VaError> for StatelessBackendError {
 }
 
 /// Upper bound (in bytes) for a single **CQP** (constant-quality; no bitrate
-/// target) coded frame at `coded_size`. Mirrors FFmpeg's `vaapi_encode` bound
-/// (`libavcodec/vaapi_encode.c`, `vaapi_encode_alloc_output_buffer`):
-/// `3 * width * height + 64 KiB` — twice the uncompressed 8-bit 4:2:0 frame
+/// target) coded frame at `coded_size`: `3 * width * height + 64 KiB`. This is
+/// twice the uncompressed 8-bit 4:2:0 frame
 /// (1.5 B/px) plus header slack. It over-estimates the largest possible
 /// compressed frame (a near-lossless all-I_PCM IDR is ~the uncompressed size),
 /// so a realistic low-QP 4K/8K IDR fits. Replaces the former fixed 1.5 MB
@@ -65,22 +65,29 @@ pub fn cqp_coded_buffer_size(coded_size: Resolution) -> usize {
 
 /// Map a [`RateControl`] variant to the libva `VA_RC_*` bitmask the encode
 /// config advertises through `VAConfigAttribRateControl`. CBR / CQP are
-/// unchanged; VBR (W-F3) selects `VA_RC_VBR` (peak carried in
+/// unchanged; VBR selects `VA_RC_VBR` (peak carried in
 /// `bits_per_second`, average expressed via `target_percentage`).
-pub(crate) fn rate_control_to_va_rc(rate_control: &RateControl) -> u32 {
-    match rate_control {
+///
+/// Every VA encoder constructor resolves its RC mode through this map, so the
+/// documented parameter invariants (VBR: `max_bitrate >= avg_bitrate > 0`) are
+/// enforced here — the construction boundary — before a VA config is created.
+pub(crate) fn rate_control_to_va_rc(
+    rate_control: &RateControl,
+) -> Result<u32, InvalidRateControlError> {
+    rate_control.validate()?;
+    Ok(match rate_control {
         RateControl::ConstantBitrate(_) => libva::VA_RC_CBR,
         RateControl::VariableBitrate { .. } => libva::VA_RC_VBR,
         RateControl::ConstantQuality(_) => libva::VA_RC_CQP,
-    }
+    })
 }
 
 /// VBR average/peak ratio as a VA `target_percentage` in `1..=100`. The VA
 /// rate-control misc param carries the **peak** in `bits_per_second`; VA then
 /// derives the average as `bits_per_second * target_percentage / 100`
-/// (`VAEncMiscParameterRateControl`, va.h), so the average/peak ratio is
-/// `avg * 100 / max`. Integer-truncated (FFmpeg's `vaapi_encode` convention)
-/// and clamped: a degenerate `avg == max` is CBR-like at the 100% ceiling, a
+/// (`VAEncMiscParameterRateControl`), so the average/peak ratio is
+/// `avg * 100 / max`. The result is integer-truncated and clamped: a degenerate
+/// `avg == max` is CBR-like at the 100% ceiling, a
 /// tiny average floors at 1%, and `max == 0` guards the division (→ 100).
 pub(crate) fn vbr_target_percentage(avg_bitrate: u64, max_bitrate: u64) -> u32 {
     if max_bitrate == 0 {
@@ -92,6 +99,10 @@ pub(crate) fn vbr_target_percentage(avg_bitrate: u64, max_bitrate: u64) -> u32 {
 pub(crate) fn tunings_to_libva_rc<const CLAMP_MIN_QP: u32, const CLAMP_MAX_QP: u32>(
     tunings: &Tunings,
 ) -> StatelessBackendResult<libva::EncMiscParameterRateControl> {
+    // Enforce the documented rate-control invariants (VBR:
+    // `max_bitrate >= avg_bitrate > 0`) before deriving any VA parameter.
+    tunings.rate_control.validate().map_err(|e| anyhow::anyhow!(e))?;
+
     let bits_per_second = tunings.rate_control.bitrate_target().unwrap_or(0);
     let bits_per_second = u32::try_from(bits_per_second).map_err(|e| anyhow::anyhow!(e))?;
 
@@ -215,8 +226,7 @@ where
     coded_size: Resolution,
     /// The mask of application-packed header types the driver expects
     /// (`VA_ENC_PACKED_HEADER_*`). `0` (`VA_ENC_PACKED_HEADER_NONE`) means the
-    /// driver self-generates them (H.264 / VP9 / AV1 here, and HEVC on Mesa);
-    /// non-zero (HEVC on iHD) means the codec backend must submit the packed
+    /// driver self-generates them; a non-zero value means the codec backend must submit the packed
     /// VPS/SPS/PPS(/slice). See [`crate::encoder::stateless::h265::vaapi`].
     packed_headers: u32,
     scratch_pool: VaSurfacePool<()>,
@@ -236,8 +246,8 @@ where
         bitrate_control: u32,
         low_power: bool,
     ) -> StatelessBackendResult<Self> {
-        // Drivers that self-generate the parameter sets (H.264 / VP9 / AV1, and
-        // HEVC on Mesa) need no packed-header attribute.
+        // Drivers that self-generate the parameter sets need no packed-header
+        // attribute.
         Self::new_with_packed_headers(
             display,
             va_profile,
@@ -251,7 +261,7 @@ where
 
     /// [`Self::new`] plus the `VAConfigAttribEncPackedHeaders` value the codec
     /// needs. When `packed_headers != 0` the config advertises it so the driver
-    /// accepts the application-packed VPS/SPS/PPS(/slice) buffers (HEVC on iHD);
+    /// accepts the application-packed VPS/SPS/PPS(/slice) buffers;
     /// `0` leaves the attribute off (the driver self-generates).
     pub fn new_with_packed_headers(
         display: Rc<Display>,
@@ -515,7 +525,7 @@ pub(crate) mod tests {
     use crate::encoder::FrameMetadata;
     use crate::FrameLayout;
 
-    /// W-F3 (M9a) — VBR rate-control mapping. Pure host test (no VA display):
+    /// VBR rate-control mapping. Pure host test (no VA display):
     /// `VariableBitrate` selects `VA_RC_VBR`, the peak (`max_bitrate`) rides
     /// `bits_per_second` via `bitrate_target`, and the average is expressed as
     /// `target_percentage = avg*100/max`. CBR / CQP are unchanged.
@@ -523,7 +533,7 @@ pub(crate) mod tests {
     fn vbr_maps_to_va_rc_vbr_with_peak_and_target_percentage() {
         // avg 4 Mbit/s under an 8 Mbit/s peak → VA_RC_VBR at 50%.
         let vbr = RateControl::VariableBitrate { avg_bitrate: 4_000_000, max_bitrate: 8_000_000 };
-        assert_eq!(rate_control_to_va_rc(&vbr), libva::VA_RC_VBR);
+        assert_eq!(rate_control_to_va_rc(&vbr), Ok(libva::VA_RC_VBR));
         // `bits_per_second` carries the peak (max); VA derives the average from
         // `target_percentage`.
         assert_eq!(vbr.bitrate_target(), Some(8_000_000));
@@ -540,9 +550,25 @@ pub(crate) mod tests {
         assert_eq!(vbr_target_percentage(9_000_000, 8_000_000), 100);
         assert_eq!(vbr_target_percentage(1_000_000, 0), 100);
 
+        // Invariant-violating VBR parameters are rejected at the construction
+        // boundary instead of programming a bogus rate controller.
+        assert!(rate_control_to_va_rc(&RateControl::VariableBitrate {
+            avg_bitrate: 0,
+            max_bitrate: 8_000_000
+        })
+        .is_err());
+        assert!(rate_control_to_va_rc(&RateControl::VariableBitrate {
+            avg_bitrate: 8_000_000,
+            max_bitrate: 4_000_000
+        })
+        .is_err());
+
         // CBR / CQP mappings are untouched.
-        assert_eq!(rate_control_to_va_rc(&RateControl::ConstantBitrate(5_000_000)), libva::VA_RC_CBR);
-        assert_eq!(rate_control_to_va_rc(&RateControl::ConstantQuality(26)), libva::VA_RC_CQP);
+        assert_eq!(
+            rate_control_to_va_rc(&RateControl::ConstantBitrate(5_000_000)),
+            Ok(libva::VA_RC_CBR)
+        );
+        assert_eq!(rate_control_to_va_rc(&RateControl::ConstantQuality(26)), Ok(libva::VA_RC_CQP));
         assert_eq!(RateControl::ConstantBitrate(5_000_000).bitrate_target(), Some(5_000_000));
         assert_eq!(RateControl::ConstantQuality(26).bitrate_target(), None);
     }

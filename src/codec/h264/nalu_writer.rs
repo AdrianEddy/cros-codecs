@@ -31,7 +31,7 @@ impl<W: Write> EmulationPrevention<W> {
             // participating in escape detection. The former
             // `write_all(&[00,00,03,curr]); prev = [None; 2]` dropped it, so an
             // input like `00 00 00 00 01` produced `..03 00 00 01` — a spurious
-            // start-code emulation (M7b review finding 6). Existing H.264 EPB
+            // start-code emulation. Existing H.264 EPB
             // tests still pass (the trailing byte was flushed anyway); the new
             // `00 00 00 00 01 -> 00 00 03 00 00 03 01` case is now correct.
             self.out.write_all(&[0x00, 0x00, 0x03])?;
@@ -55,7 +55,7 @@ impl<W: Write> EmulationPrevention<W> {
         Ok(())
     }
 
-    /// Writes a H.265 (HEVC) 2-byte `nal_unit_header()` (H.265 7.3.1.2):
+    /// Writes a two-byte H.265 (HEVC) `nal_unit_header()`:
     /// `forbidden_zero_bit` (1, always 0) | `nal_unit_type` (6) |
     /// `nuh_layer_id` (6) | `nuh_temporal_id_plus1` (3).
     fn write_header_hevc(
@@ -335,7 +335,7 @@ mod tests {
         test(&[0x00, 0x00, 0x00, 0x02], &[0x00, 0x00, 0x03, 0x00, 0x02]);
         test(&[0x00, 0x00, 0x00, 0x03], &[0x00, 0x00, 0x03, 0x00, 0x03]);
 
-        // M7b review finding 6: a ≥4-zero run followed by a low byte must retain
+        // A run of at least four zeroes followed by a low byte must retain
         // the escape's trailing zero as run context. `00 00 00 00 01` escapes the
         // first three zeros, then the retained fourth zero + the fifth make a new
         // `00 00 01` run that is itself escaped → `00 00 03 00 00 03 01` (the read

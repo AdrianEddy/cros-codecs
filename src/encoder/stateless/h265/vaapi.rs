@@ -6,19 +6,19 @@
 //! [`crate::encoder::stateless::h264::vaapi`], with the HEVC sequence / picture /
 //! slice parameter builders and the **application-packed-header** path HEVC needs.
 //!
-//! ## Packed headers (docs/codecs/impl-vaapi.md §3)
+//! ## Packed headers
 //!
-//! The Intel media driver (iHD) requires the application to supply the VPS / SPS
-//! / PPS (and, when advertised, the slice header) as packed `VAEncPackedHeader*`
-//! buffers; Mesa self-generates them and advertises
-//! `VAConfigAttribEncPackedHeaders` as `VA_ATTRIB_NOT_SUPPORTED`. At construction
-//! [`query_packed_headers`] reads the attribute and applies the Chromium
-//! all-three-or-none rule ([`decide_packed_headers`]): if the driver advertises
+//! Some drivers require the application to supply the VPS / SPS / PPS and,
+//! when advertised, the slice header as packed `VAEncPackedHeader*` buffers;
+//! others self-generate them and advertise `VAConfigAttribEncPackedHeaders` as
+//! `VA_ATTRIB_NOT_SUPPORTED`. At construction, [`query_packed_headers`] reads
+//! the attribute and applies an all-three-or-none rule
+//! ([`decide_packed_headers`]): if the driver advertises
 //! all of SEQUENCE | PICTURE | SLICE, the backend packs all of them (VPS + SPS on
-//! IDR, PPS every frame, slice header every frame) with the M7b synthesizer;
+//! IDR, PPS every frame, and a slice header every frame) with the synthesizer;
 //! otherwise it packs nothing and the driver self-generates. Either way the coded
 //! bitstream lands wholly in the driver's coded buffer (`coded_output` stays
-//! empty), so the muxer's in-band `HevcAnnexB` lift sees a complete access unit.
+//! empty), producing a complete access unit.
 //!
 //! The three `build_enc_*_param` builders are free functions (not inherent
 //! methods on [`VaapiBackend`]) because the H.264 backend already defines
@@ -89,8 +89,7 @@ use crate::Resolution;
 
 type Request<H> = BackendRequest<H, Reconstructed>;
 
-/// VA `coding_type`: I = 1, P = 2 (B = 3 — unused here). See libva-utils
-/// `hevcencode.c`.
+/// VA `coding_type`: I = 1, P = 2 (B = 3, unused here).
 const CODING_TYPE_I: u32 = 1;
 const CODING_TYPE_P: u32 = 2;
 
@@ -106,14 +105,14 @@ pub(crate) fn coding_type_for_slice(slice_type: SliceType) -> u32 {
 }
 
 /// `collocated_ref_pic_index` sentinel when `slice_temporal_mvp_enabled_flag == 0`
-/// (va_enc_hevc.h): temporal MVP is disabled, so there is no collocated picture.
+/// Temporal MVP is disabled, so there is no collocated picture.
 const COLLOCATED_REF_PIC_NONE: u8 = 0xFF;
 
-/// The Chromium all-three-or-none packed-header decision (§3). Given the queried
+/// The all-three-or-none packed-header decision. Given the queried
 /// `VAConfigAttribEncPackedHeaders` value, returns the mask of headers the
 /// application must supply: the full `SEQUENCE | PICTURE | SLICE` set when the
-/// driver advertises all three (iHD), or `0` (`VA_ENC_PACKED_HEADER_NONE`) when
-/// the attribute is unsupported (Mesa self-generates) or only partially
+/// driver advertises all three, or `0` (`VA_ENC_PACKED_HEADER_NONE`) when
+/// the attribute is unsupported or only partially
 /// advertised. Pure — unit tested without a driver.
 pub(crate) fn decide_packed_headers(attrib_value: u32) -> u32 {
     const NEED: u32 = libva::VA_ENC_PACKED_HEADER_SEQUENCE
@@ -131,7 +130,7 @@ pub(crate) fn decide_packed_headers(attrib_value: u32) -> u32 {
 
 /// Query the driver's packed-header support for `profile`/`entrypoint` and apply
 /// [`decide_packed_headers`]. A query failure is treated as "self-generating"
-/// (`0`), matching Mesa.
+/// (`0`) for drivers that generate the headers themselves.
 fn query_packed_headers(
     display: &Display,
     profile: VAProfile::Type,
@@ -153,9 +152,8 @@ fn invalid_hevc_pic() -> PictureHEVC {
 }
 
 /// A reference / current [`PictureHEVC`] from a surface id + POC. `flags` are `0`
-/// for references (matching libva-utils `hevcencode.c` — the driver derives the
-/// RPS categories from the packed slice header on iHD, and from the reference
-/// POCs on Mesa).
+/// for references because the driver derives the RPS categories from the packed
+/// slice header or the reference POCs.
 fn hevc_pic(surface_id: u32, poc: i32) -> PictureHEVC {
     PictureHEVC::new(surface_id, poc, 0)
 }
@@ -444,8 +442,8 @@ where
         ));
 
         // The sequence parameter defines the coded video sequence; submit it only
-        // on IDR (a new CVS), matching libva-utils `hevcencode.c` and the
-        // already-IDR-gated packed VPS/SPS. A mid-GOP seq param can make a driver
+        // on IDR (a new CVS), matching the already-IDR-gated packed VPS/SPS. A
+        // mid-GOP seq param can make a driver
         // treat it as a sequence boundary.
         if request.is_idr {
             let bits_per_second =
@@ -461,10 +459,10 @@ where
         picture.add_buffer(self.context().create_buffer(rc_param)?);
         picture.add_buffer(self.context().create_buffer(framerate_param)?);
 
-        // Application-packed headers (§3): VPS + SPS on IDR, PPS every frame, then
+        // Application-packed headers: VPS + SPS on IDR, PPS every frame, then
         // the picture parameter buffer, then the packed slice header + slice
-        // parameter buffer. When the driver self-generates (`packed_headers == 0`,
-        // e.g. Mesa) nothing is packed.
+        // parameter buffer. When the driver self-generates (`packed_headers == 0`),
+        // nothing is packed.
         let packed = self.packed_headers();
         if packed != 0 {
             if request.is_idr {
@@ -522,8 +520,7 @@ impl<V: VideoFrame> StatelessEncoder<V, VaapiBackend<V::MemDescriptor, Surface<V
         blocking_mode: BlockingMode,
     ) -> EncodeResult<Self> {
         // HEVC scope: Main (8-bit 4:2:0), Main10 (10-bit 4:2:0), and Main 4:2:2
-        // 10 (RExt, 10-bit 4:2:2 — probe-gated on the oxivideo side; Intel
-        // Arc/DG2-class only). The predictor derives the matching bit depth and
+        // 10 (RExt, 10-bit 4:2:2). The predictor derives the matching bit depth and
         // chroma format from the same profile; the fourcc (NV12 / P010 / Y210)
         // must agree (the caller pairs them). Any other profile is rejected
         // cleanly rather than silently mis-encoded.
@@ -534,7 +531,7 @@ impl<V: VideoFrame> StatelessEncoder<V, VaapiBackend<V::MemDescriptor, Surface<V
             _ => return Err(StatelessBackendError::UnsupportedProfile.into()),
         };
 
-        let bitrate_control = rate_control_to_va_rc(&config.initial_tunings.rate_control);
+        let bitrate_control = rate_control_to_va_rc(&config.initial_tunings.rate_control)?;
 
         let entrypoint = if low_power { VAEntrypointEncSliceLP } else { VAEntrypointEncSlice };
         let packed_headers = query_packed_headers(&display, va_profile, entrypoint);

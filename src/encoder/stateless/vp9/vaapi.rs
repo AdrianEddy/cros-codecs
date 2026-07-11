@@ -94,7 +94,7 @@ where
             ),
         ));
 
-        // From va_enc_vp9.h `ref_frame_ctrl_l0` documentation
+        // Bit assignments for `ref_frame_ctrl_l0`.
         const LAST_FRAME_AS_REF: u32 = 0x01;
         const GOLDEN_FRAME_AS_REF: u32 = 0x02;
         const ALTREF_FRAME_AS_REF: u32 = 0x04;
@@ -147,7 +147,7 @@ where
             0,
         );
 
-        // From va_enc_vp9.h `mcomp_filter_type` documentation
+        // Values for `mcomp_filter_type`.
         let mcomp_filter_type = match request.header.interpolation_filter {
             InterpolationFilter::EightTap => 0,
             InterpolationFilter::EightTapSmooth => 1,
@@ -159,7 +159,7 @@ where
         // TODO: show_existing_frame
         assert!(!request.header.show_existing_frame);
 
-        // From va_enc_vp9.h `comp_prediction_mode` documentation
+        // Values for `comp_prediction_mode`.
         const PRED_MODE_SINGLE: u32 = 0x00;
         // const PRED_MODE_COMPOUND: u32 = 0x01;
         const PRED_MODE_HYBRID: u32 = 0x02;
@@ -269,7 +269,7 @@ impl<V: VideoFrame> StatelessEncoder<V, VaapiBackend<V::MemDescriptor, Surface<V
         low_power: bool,
         blocking_mode: BlockingMode,
     ) -> EncodeResult<Self> {
-        let bitrate_control = rate_control_to_va_rc(&config.initial_tunings.rate_control);
+        let bitrate_control = rate_control_to_va_rc(&config.initial_tunings.rate_control)?;
 
         let va_profile = match config.bit_depth {
             BitDepth::Depth8 => VAProfileVP9Profile0,

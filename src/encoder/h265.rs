@@ -25,7 +25,7 @@ pub struct EncoderConfig {
     pub initial_tunings: Tunings,
     /// Optional CICP colour description threaded into the SPS VUI
     /// (`colour_description` + `video_full_range_flag`). `None` ⇒ no VUI colour
-    /// (byte-identical to the M7 Main encoder — VUI stays absent).
+    /// (the VUI stays absent).
     pub color: Option<EncoderColorInfo>,
 }
 

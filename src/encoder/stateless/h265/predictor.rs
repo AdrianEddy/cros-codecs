@@ -10,7 +10,7 @@
 //!   progressive + frame-only, the config's level.
 //! - **Coding-block sizes**: min CB `8` (`log2_min_luma_coding_block_size_minus3
 //!   == 0`), CTB `32` (`log2_diff_max_min_luma_coding_block_size == 2`) — the
-//!   libva-utils `hevcencode.c` default, universally supported. Min TB `4`, max
+//!   a broadly supported default. Min TB `4`, max
 //!   TB `32`, transform-hierarchy depth `2`.
 //! - **`dec_pic_buf_mgr`**: `sps_max_dec_pic_buffering_minus1 == 1` (current + one
 //!   reference), `max_num_reorder_pics == 0` (LowDelay, no reordering).
@@ -67,7 +67,7 @@ const CTB_SIZE: u32 = 1 << CTB_LOG2;
 /// MinCbSizeY = 8 — `pic_{width,height}_in_luma_samples` must be a multiple of it.
 const MIN_CB_SIZE: u32 = 1 << MIN_CB_LOG2;
 
-/// `(SubWidthC, SubHeightC)` for a `chroma_format_idc` (H.265 Table 6-1):
+/// `(SubWidthC, SubHeightC)` for a `chroma_format_idc`:
 /// 4:2:0 → (2, 2); 4:2:2 → (2, 1). Monochrome/4:4:4 are never emitted.
 fn sub_wh_c(chroma_format_idc: u8) -> (u32, u32) {
     match chroma_format_idc {
@@ -98,7 +98,7 @@ fn log2_max_poc_lsb_minus4(limit: u16) -> u8 {
 /// - `Main` / `Main10`: `general_profile_idc` 1 / 2, no explicit RExt
 ///   constraint block (the synthesizer emits the Main10 `[2]` reserved form).
 /// - `RangeExtensions`: `general_profile_idc == 4` with the **Main 4:2:2 10**
-///   general-constraint indicator flags (HEVC Table A.2/A.3): max_12bit,
+///   general-constraint indicator flags: max_12bit,
 ///   max_10bit, max_422chroma and lower_bit_rate set, everything else clear —
 ///   the only RExt profile the encoder emits.
 fn build_ptl(profile: Profile, level: Level) -> ProfileTierLevel {
@@ -144,7 +144,7 @@ fn profile_format(profile: Profile) -> (u8, u8) {
 /// Build the (VPS, SPS, PPS) triple for a Main 8-bit 4:2:0 LowDelay stream from
 /// the encoder config + current tunings. Split out (rather than inlined into
 /// [`LowDelayH265::new_sequence`]) so the unit tests can round-trip each set
-/// through the M7b synthesizer without a live encoder.
+/// through the synthesizer without a live encoder.
 pub(crate) fn build_parameter_sets(
     config: &EncoderConfig,
     tunings: &Tunings,
@@ -181,8 +181,8 @@ pub(crate) fn build_parameter_sets(
 
     let conformance_window_flag = coded_w != width || coded_h != height;
 
-    // W-F5: optional CICP colour description in the VUI. Absent ⇒ no VUI at all
-    // (byte-identical to the M7 Main encoder).
+    // An optional CICP colour description is carried in the VUI. Without one,
+    // the VUI is omitted entirely.
     let (vui_parameters_present_flag, vui_parameters) = match config.color {
         Some(c) => (
             true,
@@ -345,7 +345,7 @@ fn pick_init_qp(tunings: &Tunings) -> u8 {
     let min_qp = tunings.min_quality.max(MIN_QP as u32);
     // Raise `max_qp` to at least `min_qp` before clamping: a fork caller may set
     // `min_quality > 51`, which would leave `min_qp > max_qp` and panic
-    // `u32::clamp`. (Not reachable via oxivideo, but keep the helper total.)
+    // `u32::clamp`, so keep the helper total for all callers.
     let max_qp = tunings.max_quality.min(MAX_QP as u32).max(min_qp);
     if let RateControl::ConstantQuality(init_qp) = tunings.rate_control {
         init_qp.clamp(min_qp, max_qp) as u8
