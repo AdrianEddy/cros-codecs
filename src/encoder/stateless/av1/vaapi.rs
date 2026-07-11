@@ -27,6 +27,7 @@ use libva::VAProfile::VAProfileAV1Profile1;
 use libva::VaError;
 use libva::VA_INVALID_ID;
 
+use crate::backend::vaapi::encoder::rate_control_to_va_rc;
 use crate::backend::vaapi::encoder::tunings_to_libva_rc;
 use crate::backend::vaapi::encoder::CodedOutputPromise;
 use crate::backend::vaapi::encoder::Reconstructed;
@@ -51,7 +52,6 @@ use crate::encoder::stateless::StatelessBackendResult;
 use crate::encoder::stateless::StatelessEncoder;
 use crate::encoder::stateless::StatelessVideoEncoderBackend;
 use crate::encoder::EncodeResult;
-use crate::encoder::RateControl;
 use crate::video_frame::VideoFrame;
 use crate::BlockingMode;
 use crate::Fourcc;
@@ -575,15 +575,12 @@ impl<V: VideoFrame>
             _ => return Err(StatelessBackendError::UnsupportedProfile.into()),
         };
 
-        // Rate-control mode → libva RC. CQP has always worked; CBR is added
-        // (W-F4) — the drivers support it, only this ctor gated it out by
-        // returning `Unsupported` and hardcoding `VA_RC_CQP`. Mirrors the VP9
-        // and H.264 encoder ctors in this crate. The per-frame RC + framerate
-        // misc params are submitted in `encode_tile_group`.
-        let bitrate_control = match config.initial_tunings.rate_control {
-            RateControl::ConstantBitrate(_) => libva::VA_RC_CBR,
-            RateControl::ConstantQuality(_) => libva::VA_RC_CQP,
-        };
+        // Rate-control mode → libva RC. CQP has always worked; CBR (W-F4) and
+        // VBR (W-F3) are wired through the shared `rate_control_to_va_rc` map —
+        // the drivers support them, only this ctor once gated them out by
+        // returning `Unsupported` and hardcoding `VA_RC_CQP`. The per-frame RC +
+        // framerate misc params are submitted in `encode_tile_group`.
+        let bitrate_control = rate_control_to_va_rc(&config.initial_tunings.rate_control);
 
         let backend = VaapiBackend::new(
             display,

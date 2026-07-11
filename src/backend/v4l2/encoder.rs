@@ -523,6 +523,10 @@ where
             "bitrate mode",
             match rate_control {
                 RateControl::ConstantBitrate(_) => VideoBitrateMode::ConstantBitrate,
+                // VBR (W-F3): V4L2's variable-bitrate mode. `bitrate_target()`
+                // reports the peak (`max_bitrate`), applied as the bitrate
+                // control below.
+                RateControl::VariableBitrate { .. } => VideoBitrateMode::VariableBitrate,
                 RateControl::ConstantQuality(_) => VideoBitrateMode::ConstantQuality,
             },
         )?;

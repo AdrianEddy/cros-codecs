@@ -29,6 +29,7 @@ use libva::VA_INVALID_ID;
 use libva::VA_PICTURE_H264_LONG_TERM_REFERENCE;
 use libva::VA_PICTURE_H264_SHORT_TERM_REFERENCE;
 
+use crate::backend::vaapi::encoder::rate_control_to_va_rc;
 use crate::backend::vaapi::encoder::tunings_to_libva_rc;
 use crate::backend::vaapi::encoder::CodedOutputPromise;
 use crate::backend::vaapi::encoder::Reconstructed;
@@ -52,6 +53,10 @@ use crate::encoder::stateless::StatelessBackendError;
 use crate::encoder::stateless::StatelessBackendResult;
 use crate::encoder::stateless::StatelessVideoEncoderBackend;
 use crate::encoder::EncodeResult;
+// Only the `#[cfg(test)]` module references `RateControl` directly now that
+// the RC→VA_RC map moved to `rate_control_to_va_rc`; gate the import so a
+// non-test build doesn't see it as unused.
+#[cfg(test)]
 use crate::encoder::RateControl;
 use crate::video_frame::VideoFrame;
 use crate::BlockingMode;
@@ -447,10 +452,7 @@ impl<V: VideoFrame> StatelessEncoder<V, VaapiBackend<V::MemDescriptor, Surface<V
             _ => return Err(StatelessBackendError::UnsupportedProfile.into()),
         };
 
-        let bitrate_control = match config.initial_tunings.rate_control {
-            RateControl::ConstantBitrate(_) => libva::VA_RC_CBR,
-            RateControl::ConstantQuality(_) => libva::VA_RC_CQP,
-        };
+        let bitrate_control = rate_control_to_va_rc(&config.initial_tunings.rate_control);
 
         let backend =
             VaapiBackend::new(display, va_profile, fourcc, coded_size, bitrate_control, low_power)?;

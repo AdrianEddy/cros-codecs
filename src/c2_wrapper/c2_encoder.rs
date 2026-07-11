@@ -28,6 +28,7 @@ use crate::encoder::FrameMetadata;
 use crate::encoder::RateControl;
 use crate::encoder::RateControl::ConstantBitrate;
 use crate::encoder::RateControl::ConstantQuality;
+use crate::encoder::RateControl::VariableBitrate;
 use crate::encoder::Tunings;
 use crate::encoder::VideoEncoder;
 use crate::image_processing::convert_video_frame;
@@ -227,6 +228,11 @@ where
 
                 let curr_bitrate = match self.current_tunings.rate_control {
                     ConstantBitrate(bitrate) => bitrate,
+                    // VBR (W-F3): compare against the peak (`max_bitrate`), the
+                    // value `bitrate_target()` reports. The dynamic re-tune below
+                    // is CBR-only (as it already was), so a VBR stream is treated
+                    // like its peak here.
+                    VariableBitrate { max_bitrate, .. } => max_bitrate,
                     ConstantQuality(_) => {
                         log::debug!("CQ encoding not currently supported");
                         *self.state.lock().unwrap() = C2State::C2Error;

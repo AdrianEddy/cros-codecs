@@ -63,14 +63,48 @@ pub fn cqp_coded_buffer_size(coded_size: Resolution) -> usize {
     w.saturating_mul(h).saturating_mul(3).saturating_add(1 << 16)
 }
 
+/// Map a [`RateControl`] variant to the libva `VA_RC_*` bitmask the encode
+/// config advertises through `VAConfigAttribRateControl`. CBR / CQP are
+/// unchanged; VBR (W-F3) selects `VA_RC_VBR` (peak carried in
+/// `bits_per_second`, average expressed via `target_percentage`).
+pub(crate) fn rate_control_to_va_rc(rate_control: &RateControl) -> u32 {
+    match rate_control {
+        RateControl::ConstantBitrate(_) => libva::VA_RC_CBR,
+        RateControl::VariableBitrate { .. } => libva::VA_RC_VBR,
+        RateControl::ConstantQuality(_) => libva::VA_RC_CQP,
+    }
+}
+
+/// VBR average/peak ratio as a VA `target_percentage` in `1..=100`. The VA
+/// rate-control misc param carries the **peak** in `bits_per_second`; VA then
+/// derives the average as `bits_per_second * target_percentage / 100`
+/// (`VAEncMiscParameterRateControl`, va.h), so the average/peak ratio is
+/// `avg * 100 / max`. Integer-truncated (FFmpeg's `vaapi_encode` convention)
+/// and clamped: a degenerate `avg == max` is CBR-like at the 100% ceiling, a
+/// tiny average floors at 1%, and `max == 0` guards the division (→ 100).
+pub(crate) fn vbr_target_percentage(avg_bitrate: u64, max_bitrate: u64) -> u32 {
+    if max_bitrate == 0 {
+        return 100;
+    }
+    (avg_bitrate.saturating_mul(100) / max_bitrate).clamp(1, 100) as u32
+}
+
 pub(crate) fn tunings_to_libva_rc<const CLAMP_MIN_QP: u32, const CLAMP_MAX_QP: u32>(
     tunings: &Tunings,
 ) -> StatelessBackendResult<libva::EncMiscParameterRateControl> {
     let bits_per_second = tunings.rate_control.bitrate_target().unwrap_or(0);
     let bits_per_second = u32::try_from(bits_per_second).map_err(|e| anyhow::anyhow!(e))?;
 
-    // At the moment we don't support variable bitrate therefore target 100%
-    const TARGET_PERCENTAGE: u32 = 100;
+    // Target/peak ratio. VBR carries the peak in `bits_per_second` (via
+    // `bitrate_target`) and expresses the average through `target_percentage`
+    // (`avg = bits_per_second * pct / 100`); CBR / CQP keep the full 100%
+    // (single rate target / no rate target).
+    let target_percentage = match tunings.rate_control {
+        RateControl::VariableBitrate { avg_bitrate, max_bitrate } => {
+            vbr_target_percentage(avg_bitrate, max_bitrate)
+        }
+        _ => 100,
+    };
 
     // Window size in ms that the RC should apply to
     const WINDOW_SIZE: u32 = 1_500;
@@ -127,7 +161,7 @@ pub(crate) fn tunings_to_libva_rc<const CLAMP_MIN_QP: u32, const CLAMP_MAX_QP: u
 
     Ok(libva::EncMiscParameterRateControl::new(
         bits_per_second,
-        TARGET_PERCENTAGE,
+        target_percentage,
         WINDOW_SIZE,
         initial_qp,
         min_qp,
@@ -480,6 +514,38 @@ pub(crate) mod tests {
     use crate::encoder::tests::get_test_frame_t;
     use crate::encoder::FrameMetadata;
     use crate::FrameLayout;
+
+    /// W-F3 (M9a) — VBR rate-control mapping. Pure host test (no VA display):
+    /// `VariableBitrate` selects `VA_RC_VBR`, the peak (`max_bitrate`) rides
+    /// `bits_per_second` via `bitrate_target`, and the average is expressed as
+    /// `target_percentage = avg*100/max`. CBR / CQP are unchanged.
+    #[test]
+    fn vbr_maps_to_va_rc_vbr_with_peak_and_target_percentage() {
+        // avg 4 Mbit/s under an 8 Mbit/s peak → VA_RC_VBR at 50%.
+        let vbr = RateControl::VariableBitrate { avg_bitrate: 4_000_000, max_bitrate: 8_000_000 };
+        assert_eq!(rate_control_to_va_rc(&vbr), libva::VA_RC_VBR);
+        // `bits_per_second` carries the peak (max); VA derives the average from
+        // `target_percentage`.
+        assert_eq!(vbr.bitrate_target(), Some(8_000_000));
+        assert_eq!(vbr_target_percentage(4_000_000, 8_000_000), 50);
+
+        // target_percentage math: 75%, integer truncation (87.5 → 87), and a
+        // degenerate avg == max at the 100% ceiling.
+        assert_eq!(vbr_target_percentage(6_000_000, 8_000_000), 75);
+        assert_eq!(vbr_target_percentage(7_000_000, 8_000_000), 87);
+        assert_eq!(vbr_target_percentage(8_000_000, 8_000_000), 100);
+        // Clamp guards: a tiny average floors at 1%; an over-peak average (which
+        // the caller rejects) still caps at 100%; max == 0 guards the division.
+        assert_eq!(vbr_target_percentage(1, 1_000_000), 1);
+        assert_eq!(vbr_target_percentage(9_000_000, 8_000_000), 100);
+        assert_eq!(vbr_target_percentage(1_000_000, 0), 100);
+
+        // CBR / CQP mappings are untouched.
+        assert_eq!(rate_control_to_va_rc(&RateControl::ConstantBitrate(5_000_000)), libva::VA_RC_CBR);
+        assert_eq!(rate_control_to_va_rc(&RateControl::ConstantQuality(26)), libva::VA_RC_CQP);
+        assert_eq!(RateControl::ConstantBitrate(5_000_000).bitrate_target(), Some(5_000_000));
+        assert_eq!(RateControl::ConstantQuality(26).bitrate_target(), None);
+    }
 
     fn map_surface<'a, M: SurfaceMemoryDescriptor>(
         display: &Rc<Display>,

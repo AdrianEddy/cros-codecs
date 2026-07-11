@@ -56,6 +56,7 @@ use libva::VAProfile;
 use libva::VA_INVALID_ID;
 use libva::VA_PICTURE_HEVC_INVALID;
 
+use crate::backend::vaapi::encoder::rate_control_to_va_rc;
 use crate::backend::vaapi::encoder::tunings_to_libva_rc;
 use crate::backend::vaapi::encoder::CodedOutputPromise;
 use crate::backend::vaapi::encoder::Reconstructed;
@@ -81,7 +82,6 @@ use crate::encoder::stateless::StatelessBackendError;
 use crate::encoder::stateless::StatelessBackendResult;
 use crate::encoder::stateless::StatelessVideoEncoderBackend;
 use crate::encoder::EncodeResult;
-use crate::encoder::RateControl;
 use crate::video_frame::VideoFrame;
 use crate::BlockingMode;
 use crate::Fourcc;
@@ -534,10 +534,7 @@ impl<V: VideoFrame> StatelessEncoder<V, VaapiBackend<V::MemDescriptor, Surface<V
             _ => return Err(StatelessBackendError::UnsupportedProfile.into()),
         };
 
-        let bitrate_control = match config.initial_tunings.rate_control {
-            RateControl::ConstantBitrate(_) => libva::VA_RC_CBR,
-            RateControl::ConstantQuality(_) => libva::VA_RC_CQP,
-        };
+        let bitrate_control = rate_control_to_va_rc(&config.initial_tunings.rate_control);
 
         let entrypoint = if low_power { VAEntrypointEncSliceLP } else { VAEntrypointEncSlice };
         let packed_headers = query_packed_headers(&display, va_profile, entrypoint);

@@ -22,6 +22,7 @@ use libva::VP9EncPicFlags;
 use libva::VP9EncRefFlags;
 use libva::VA_INVALID_SURFACE;
 
+use crate::backend::vaapi::encoder::rate_control_to_va_rc;
 use crate::backend::vaapi::encoder::tunings_to_libva_rc;
 use crate::backend::vaapi::encoder::CodedOutputPromise;
 use crate::backend::vaapi::encoder::Reconstructed;
@@ -45,6 +46,10 @@ use crate::encoder::stateless::StatelessVideoEncoderBackend;
 use crate::encoder::vp9::EncoderConfig;
 use crate::encoder::vp9::VP9;
 use crate::encoder::EncodeResult;
+// Only the `#[cfg(test)]` module references `RateControl` directly now that
+// the RC→VA_RC map moved to `rate_control_to_va_rc`; gate the import so a
+// non-test build doesn't see it as unused.
+#[cfg(test)]
 use crate::encoder::RateControl;
 use crate::video_frame::VideoFrame;
 use crate::BlockingMode;
@@ -264,10 +269,7 @@ impl<V: VideoFrame> StatelessEncoder<V, VaapiBackend<V::MemDescriptor, Surface<V
         low_power: bool,
         blocking_mode: BlockingMode,
     ) -> EncodeResult<Self> {
-        let bitrate_control = match config.initial_tunings.rate_control {
-            RateControl::ConstantBitrate(_) => libva::VA_RC_CBR,
-            RateControl::ConstantQuality(_) => libva::VA_RC_CQP,
-        };
+        let bitrate_control = rate_control_to_va_rc(&config.initial_tunings.rate_control);
 
         let va_profile = match config.bit_depth {
             BitDepth::Depth8 => VAProfileVP9Profile0,

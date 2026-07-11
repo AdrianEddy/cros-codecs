@@ -26,6 +26,16 @@ pub enum RateControl {
     /// The encoder shall maintain the constant bitrate
     ConstantBitrate(u64),
 
+    /// Variable bitrate: the encoder targets `avg_bitrate` on average while
+    /// permitting bursts up to `max_bitrate` (the peak / HRD ceiling). Maps to
+    /// `VA_RC_VBR`: the VA rate-control misc param carries the **peak** in
+    /// `bits_per_second` and derives the average from
+    /// `target_percentage = avg_bitrate * 100 / max_bitrate` (VA computes
+    /// `target = bits_per_second * target_percentage / 100`, per
+    /// `VAEncMiscParameterRateControl` in va.h). Requires
+    /// `max_bitrate >= avg_bitrate > 0` (validated by the caller).
+    VariableBitrate { avg_bitrate: u64, max_bitrate: u64 },
+
     /// The encoder shall maintain codec specific quality parameter constant (eg. QP for H.264)
     /// disregarding bitrate.
     ConstantQuality(u32),
@@ -40,6 +50,11 @@ impl RateControl {
     pub(crate) fn bitrate_target(&self) -> Option<u64> {
         match self {
             RateControl::ConstantBitrate(target) => Some(*target),
+            // VBR: the VA rate-control misc param carries the peak in
+            // `bits_per_second` (the average is derived via `target_percentage`),
+            // and the coded-output buffer is sized from the peak — both want
+            // `max_bitrate`.
+            RateControl::VariableBitrate { max_bitrate, .. } => Some(*max_bitrate),
             RateControl::ConstantQuality(_) => None,
         }
     }
