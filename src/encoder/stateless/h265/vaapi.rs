@@ -521,10 +521,16 @@ impl<V: VideoFrame> StatelessEncoder<V, VaapiBackend<V::MemDescriptor, Surface<V
         low_power: bool,
         blocking_mode: BlockingMode,
     ) -> EncodeResult<Self> {
-        // M7 scope: HEVC Main (8-bit 4:2:0). Main10 (10-bit) is M8 — reject
-        // cleanly rather than silently encode 8-bit.
+        // HEVC scope: Main (8-bit 4:2:0), Main10 (10-bit 4:2:0), and Main 4:2:2
+        // 10 (RExt, 10-bit 4:2:2 — probe-gated on the oxivideo side; Intel
+        // Arc/DG2-class only). The predictor derives the matching bit depth and
+        // chroma format from the same profile; the fourcc (NV12 / P010 / Y210)
+        // must agree (the caller pairs them). Any other profile is rejected
+        // cleanly rather than silently mis-encoded.
         let va_profile = match config.profile {
             Profile::Main => VAProfile::VAProfileHEVCMain,
+            Profile::Main10 => VAProfile::VAProfileHEVCMain10,
+            Profile::RangeExtensions => VAProfile::VAProfileHEVCMain422_10,
             _ => return Err(StatelessBackendError::UnsupportedProfile.into()),
         };
 

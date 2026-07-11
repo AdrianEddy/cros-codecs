@@ -28,6 +28,10 @@ mod predictor;
 #[cfg(feature = "vaapi")]
 pub mod vaapi;
 
+#[cfg(test)]
+#[path = "av1/tests.rs"]
+mod tests;
+
 pub struct BackendRequest<P, R> {
     /// Current sequence's header OBU
     sequence: SequenceHeaderObu,

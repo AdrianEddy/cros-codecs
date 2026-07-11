@@ -4,6 +4,7 @@
 
 use crate::codec::h264::parser::Level;
 use crate::codec::h264::parser::Profile;
+use crate::encoder::EncoderColorInfo;
 use crate::encoder::PredictionStructure;
 use crate::encoder::Tunings;
 use crate::Resolution;
@@ -18,6 +19,10 @@ pub struct EncoderConfig {
     pub pred_structure: PredictionStructure,
     /// Initial tunings values
     pub initial_tunings: Tunings,
+    /// Optional CICP colour description threaded into the SPS VUI
+    /// (`colour_description` + `video_full_range_flag`). `None` ⇒ no colour is
+    /// signalled (byte-identical to the pre-M8 encoder).
+    pub color: Option<EncoderColorInfo>,
 }
 
 impl Default for EncoderConfig {
@@ -29,6 +34,7 @@ impl Default for EncoderConfig {
             level: Level::L4,
             pred_structure: PredictionStructure::LowDelay { limit: 2048 },
             initial_tunings: Default::default(),
+            color: None,
         }
     }
 }

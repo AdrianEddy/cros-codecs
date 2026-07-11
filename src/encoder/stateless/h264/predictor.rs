@@ -84,7 +84,7 @@ impl<Picture, Reference> LowDelayH264<Picture, Reference> {
             _ => sps.chroma_format_idc(1),
         };
 
-        let sps = sps
+        let mut sps = sps
             .level_idc(config.level)
             .max_frame_num(self.limit as u32)
             .pic_order_cnt_type(0)
@@ -97,8 +97,15 @@ impl<Picture, Reference> LowDelayH264<Picture, Reference> {
             .bit_depth_luma(8)
             .bit_depth_chroma(8)
             .aspect_ratio(1, 1)
-            .timing_info(1, self.tunings.framerate * 2, false)
-            .build();
+            .timing_info(1, self.tunings.framerate * 2, false);
+
+        // W-F5: thread the caller's CICP colour description into the VUI. Absent
+        // ⇒ the VUI carries no `video_signal_type` block (unchanged behaviour).
+        if let Some(c) = config.color {
+            sps = sps.video_signal_type(c.full_range, c.primaries, c.transfer, c.matrix);
+        }
+
+        let sps = sps.build();
 
         let min_qp = self.tunings.min_quality.max(MIN_QP as u32);
         let max_qp = self.tunings.max_quality.min(MAX_QP as u32);

@@ -29,6 +29,10 @@ mod predictor;
 #[cfg(feature = "vaapi")]
 pub mod vaapi;
 
+#[cfg(test)]
+#[path = "h264/tests.rs"]
+mod tests;
+
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 pub enum IsReference {
     No,

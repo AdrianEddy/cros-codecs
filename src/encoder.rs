@@ -78,6 +78,32 @@ impl Default for Tunings {
     }
 }
 
+/// Sequence-level colour description (CICP / ITU-T H.273) an encoder writes into
+/// the coded bitstream so a decoder can reproduce the intended colour volume.
+///
+/// The three code points are the CICP identifiers shared by every codec's
+/// colour syntax (H.264/H.265 VUI `colour_description`, AV1 `color_config`,
+/// VP9 does not expose them on its VA-API encode path — see the VP9 encoder).
+/// `2` is the CICP "Unspecified" value for all three. `full_range` selects
+/// full-range (JPEG/PC, 0..255) versus limited-range (studio/TV, 16..235) luma
+/// and chroma.
+///
+/// This is the codec-neutral carrier a caller threads through an
+/// `EncoderConfig` (`None` ⇒ no colour signalled, the pre-M8 behaviour).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EncoderColorInfo {
+    /// CICP colour primaries (`ColourPrimaries`, H.273 Table 2). `2` = Unspecified.
+    pub primaries: u8,
+    /// CICP transfer characteristics (`TransferCharacteristics`, H.273 Table 3).
+    /// `2` = Unspecified.
+    pub transfer: u8,
+    /// CICP matrix coefficients (`MatrixCoefficients`, H.273 Table 4).
+    /// `2` = Unspecified.
+    pub matrix: u8,
+    /// Full-range (`1`) vs limited/studio-range (`0`) luma & chroma.
+    pub full_range: bool,
+}
+
 /// Encoder's input metadata
 #[derive(Debug, Clone)]
 pub struct FrameMetadata {

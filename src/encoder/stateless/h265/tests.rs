@@ -31,6 +31,7 @@ use crate::encoder::stateless::h265::DpbEntry;
 use crate::encoder::stateless::h265::DpbEntryMeta;
 use crate::encoder::stateless::predictor::LowDelayDelegate;
 use crate::encoder::stateless::FrameMetadata;
+use crate::encoder::EncoderColorInfo;
 use crate::encoder::PredictionStructure;
 use crate::encoder::RateControl;
 use crate::encoder::Tunings;
@@ -45,7 +46,20 @@ fn config(width: u32, height: u32, limit: u16) -> EncoderConfig {
         level: Level::L4,
         pred_structure: PredictionStructure::LowDelay { limit },
         initial_tunings: Tunings::default(),
+        color: None,
     }
+}
+
+/// A `config` with an explicit profile and optional CICP colour, for the
+/// Main10 / Main 4:2:2 10 / VUI round-trip tests.
+fn config_profile(
+    width: u32,
+    height: u32,
+    limit: u16,
+    profile: Profile,
+    color: Option<EncoderColorInfo>,
+) -> EncoderConfig {
+    EncoderConfig { profile, color, ..config(width, height, limit) }
 }
 
 fn frame_meta(timestamp: u64, force_keyframe: bool) -> FrameMetadata {
@@ -220,6 +234,124 @@ fn predictor_pps_round_trips() {
     assert!(!parsed.transform_skip_enabled_flag);
 
     assert_eq!(pps_buf, synth_pps(&parsed), "PPS byte-idempotence");
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// M8a: Main10 (10-bit 4:2:0) and Main 4:2:2 10 SPS field selection +
+// VUI CICP colour — all round-tripped through the synthesizer/parser.
+// ─────────────────────────────────────────────────────────────────────
+
+#[test]
+fn predictor_sps_main10_420_10bit() {
+    let cfg = config_profile(1920, 1080, 60, Profile::Main10, None);
+    let (_vps, sps, _pps) = build_parameter_sets(&cfg, &Tunings::default(), 60);
+
+    let buf1 = synth_sps(&sps);
+    let nalu = next_nalu(&buf1, NaluType::SpsNut);
+    let mut parser = Parser::default();
+    let parsed = (*parser.parse_sps(&nalu).unwrap()).clone();
+
+    assert_eq!(parsed.profile_tier_level.general_profile_idc, 2, "Main10");
+    assert!(parsed.profile_tier_level.general_profile_compatibility_flag[2]);
+    assert_eq!(parsed.chroma_format_idc, 1, "4:2:0");
+    assert_eq!(parsed.bit_depth_luma_minus8, 2, "10-bit luma");
+    assert_eq!(parsed.bit_depth_chroma_minus8, 2, "10-bit chroma");
+    assert_eq!(parsed.chroma_array_type, 1);
+    assert!(!parsed.vui_parameters_present_flag, "no colour requested");
+
+    assert_eq!(buf1, synth_sps(&parsed), "Main10 SPS byte-idempotence");
+}
+
+#[test]
+fn predictor_sps_main422_10_422_10bit() {
+    // Main 4:2:2 10 is signalled as RExt (general_profile_idc == 4) with the
+    // Table A.2/A.3 constraint flags; chroma_format_idc == 2, 10-bit.
+    let cfg = config_profile(1920, 1080, 60, Profile::RangeExtensions, None);
+    let (_vps, sps, _pps) = build_parameter_sets(&cfg, &Tunings::default(), 60);
+
+    let buf1 = synth_sps(&sps);
+    let nalu = next_nalu(&buf1, NaluType::SpsNut);
+    let mut parser = Parser::default();
+    let parsed = (*parser.parse_sps(&nalu).unwrap()).clone();
+
+    let ptl = &parsed.profile_tier_level;
+    assert_eq!(ptl.general_profile_idc, 4, "RExt");
+    assert!(ptl.general_max_12bit_constraint_flag);
+    assert!(ptl.general_max_10bit_constraint_flag);
+    assert!(!ptl.general_max_8bit_constraint_flag);
+    assert!(ptl.general_max_422chroma_constraint_flag);
+    assert!(!ptl.general_max_420chroma_constraint_flag);
+    assert!(ptl.general_lower_bit_rate_constraint_flag);
+    assert_eq!(parsed.chroma_format_idc, 2, "4:2:2");
+    assert_eq!(parsed.chroma_array_type, 2);
+    assert_eq!(parsed.bit_depth_luma_minus8, 2, "10-bit luma");
+    assert_eq!(parsed.bit_depth_chroma_minus8, 2, "10-bit chroma");
+
+    assert_eq!(buf1, synth_sps(&parsed), "Main422_10 SPS byte-idempotence");
+}
+
+#[test]
+fn predictor_sps_main422_10_conformance_window_uses_422_subsampling() {
+    // 1920x1082: height not a multiple of MinCbSizeY (8) → pads to 1088. In
+    // 4:2:2 SubHeightC is 1, so the bottom conformance offset is the full
+    // (1088 - 1082) = 6 luma rows (not /2 as it would be in 4:2:0).
+    let cfg = config_profile(1920, 1082, 60, Profile::RangeExtensions, None);
+    let (_vps, sps, _pps) = build_parameter_sets(&cfg, &Tunings::default(), 60);
+
+    let buf1 = synth_sps(&sps);
+    let nalu = next_nalu(&buf1, NaluType::SpsNut);
+    let mut parser = Parser::default();
+    let parsed = (*parser.parse_sps(&nalu).unwrap()).clone();
+
+    assert_eq!(parsed.pic_height_in_luma_samples, 1088);
+    assert!(parsed.conformance_window_flag);
+    assert_eq!(parsed.conf_win_bottom_offset, 6, "(1088 - 1082) / SubHeightC(1)");
+
+    assert_eq!(buf1, synth_sps(&parsed), "422 conformance-window SPS byte-idempotence");
+}
+
+#[test]
+fn predictor_sps_vui_cicp_colour_survives() {
+    // BT.2020 non-constant-luminance, PQ transfer, limited range — the typical
+    // HDR10 CICP (9 / 16 / 9), signalled in the Main10 VUI.
+    let color = EncoderColorInfo { primaries: 9, transfer: 16, matrix: 9, full_range: false };
+    let cfg = config_profile(1920, 1080, 60, Profile::Main10, Some(color));
+    let (_vps, sps, _pps) = build_parameter_sets(&cfg, &Tunings::default(), 60);
+
+    let buf1 = synth_sps(&sps);
+    let nalu = next_nalu(&buf1, NaluType::SpsNut);
+    let mut parser = Parser::default();
+    let parsed = (*parser.parse_sps(&nalu).unwrap()).clone();
+
+    assert!(parsed.vui_parameters_present_flag);
+    let vui = &parsed.vui_parameters;
+    assert!(vui.video_signal_type_present_flag);
+    assert!(!vui.video_full_range_flag, "limited range");
+    assert!(vui.colour_description_present_flag);
+    assert_eq!(vui.colour_primaries, 9, "BT.2020");
+    assert_eq!(vui.transfer_characteristics, 16, "SMPTE ST 2084 (PQ)");
+    assert_eq!(vui.matrix_coeffs, 9, "BT.2020 NCL");
+
+    assert_eq!(buf1, synth_sps(&parsed), "VUI SPS byte-idempotence");
+}
+
+#[test]
+fn predictor_sps_full_range_flag_survives() {
+    let color = EncoderColorInfo { primaries: 1, transfer: 1, matrix: 1, full_range: true };
+    let cfg = config_profile(1280, 720, 60, Profile::Main, Some(color));
+    let (_vps, sps, _pps) = build_parameter_sets(&cfg, &Tunings::default(), 60);
+
+    let buf1 = synth_sps(&sps);
+    let nalu = next_nalu(&buf1, NaluType::SpsNut);
+    let mut parser = Parser::default();
+    let parsed = (*parser.parse_sps(&nalu).unwrap()).clone();
+
+    let vui = &parsed.vui_parameters;
+    assert!(vui.video_full_range_flag, "full range");
+    assert_eq!(vui.colour_primaries, 1, "BT.709");
+    assert_eq!(parsed.bit_depth_luma_minus8, 0, "Main is still 8-bit with colour");
+
+    assert_eq!(buf1, synth_sps(&parsed), "full-range SPS byte-idempotence");
 }
 
 // ─────────────────────────────────────────────────────────────────────

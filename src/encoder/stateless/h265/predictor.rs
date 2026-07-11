@@ -36,6 +36,7 @@ use crate::codec::h265::parser::ShortTermRefPicSet;
 use crate::codec::h265::parser::SliceHeader;
 use crate::codec::h265::parser::SliceType;
 use crate::codec::h265::parser::Sps;
+use crate::codec::h265::parser::VuiParams;
 use crate::codec::h265::parser::Vps;
 use crate::encoder::stateless::h265::BackendRequest;
 use crate::encoder::stateless::h265::DpbEntry;
@@ -66,9 +67,14 @@ const CTB_SIZE: u32 = 1 << CTB_LOG2;
 /// MinCbSizeY = 8 — `pic_{width,height}_in_luma_samples` must be a multiple of it.
 const MIN_CB_SIZE: u32 = 1 << MIN_CB_LOG2;
 
-/// 4:2:0 chroma sub-sampling factors (SubWidthC / SubHeightC).
-const SUB_WIDTH_C: u32 = 2;
-const SUB_HEIGHT_C: u32 = 2;
+/// `(SubWidthC, SubHeightC)` for a `chroma_format_idc` (H.265 Table 6-1):
+/// 4:2:0 → (2, 2); 4:2:2 → (2, 1). Monochrome/4:4:4 are never emitted.
+fn sub_wh_c(chroma_format_idc: u8) -> (u32, u32) {
+    match chroma_format_idc {
+        2 => (2, 1), // 4:2:2
+        _ => (2, 2), // 4:2:0
+    }
+}
 
 /// Round `x` up to a multiple of `a` (`a` a power of two ≥ 1).
 fn align_up(x: u32, a: u32) -> u32 {
@@ -87,18 +93,51 @@ fn log2_max_poc_lsb_minus4(limit: u16) -> u8 {
     v
 }
 
-/// The Main-profile `profile_tier_level` for a single-sub-layer Main stream.
+/// The `profile_tier_level` for a single-sub-layer stream of the given profile.
+///
+/// - `Main` / `Main10`: `general_profile_idc` 1 / 2, no explicit RExt
+///   constraint block (the synthesizer emits the Main10 `[2]` reserved form).
+/// - `RangeExtensions`: `general_profile_idc == 4` with the **Main 4:2:2 10**
+///   general-constraint indicator flags (HEVC Table A.2/A.3): max_12bit,
+///   max_10bit, max_422chroma and lower_bit_rate set, everything else clear —
+///   the only RExt profile the encoder emits.
 fn build_ptl(profile: Profile, level: Level) -> ProfileTierLevel {
     let idc = profile as u8;
     let mut compat = [false; 32];
     compat[idc as usize] = true;
-    ProfileTierLevel {
+    let mut ptl = ProfileTierLevel {
         general_profile_idc: idc,
         general_profile_compatibility_flag: compat,
         general_progressive_source_flag: true,
         general_frame_only_constraint_flag: true,
         general_level_idc: level,
         ..Default::default()
+    };
+    if profile == Profile::RangeExtensions {
+        // Main 4:2:2 10 constraint flags.
+        ptl.general_max_12bit_constraint_flag = true;
+        ptl.general_max_10bit_constraint_flag = true;
+        ptl.general_max_8bit_constraint_flag = false;
+        ptl.general_max_422chroma_constraint_flag = true;
+        ptl.general_max_420chroma_constraint_flag = false;
+        ptl.general_max_monochrome_constraint_flag = false;
+        ptl.general_intra_constraint_flag = false;
+        ptl.general_one_picture_only_constraint_flag = false;
+        ptl.general_lower_bit_rate_constraint_flag = true;
+    }
+    ptl
+}
+
+/// Bit depth (as `bit_depth_*_minus8`) and chroma format (`chroma_format_idc`)
+/// for a general profile: `Main` → 8-bit 4:2:0, `Main10` → 10-bit 4:2:0,
+/// `RangeExtensions` → 10-bit 4:2:2 (Main 4:2:2 10). Any other profile is
+/// rejected earlier at `new_vaapi`; default to Main's 8-bit 4:2:0.
+fn profile_format(profile: Profile) -> (u8, u8) {
+    match profile {
+        Profile::Main => (0, 1),
+        Profile::Main10 => (2, 1),
+        Profile::RangeExtensions => (2, 2),
+        _ => (0, 1),
     }
 }
 
@@ -122,6 +161,12 @@ pub(crate) fn build_parameter_sets(
     let level = config.level;
     let ptl = build_ptl(config.profile, level);
 
+    // Bit depth (Main → 8, Main10/Main422_10 → 10) and chroma format (4:2:0 vs
+    // 4:2:2) are a function of the general profile. The conformance-window
+    // offsets are in chroma sample units, so they use SubWidthC/SubHeightC.
+    let (bit_depth_minus8, chroma_format_idc) = profile_format(config.profile);
+    let (sub_width_c, sub_height_c) = sub_wh_c(chroma_format_idc);
+
     // dec_pic_buf_mgr: current + one reference ⇒ buffering of 2 (minus1 = 1),
     // no reordering (LowDelay), no latency bound.
     let mut max_dec_pic_buffering_minus1 = [0u8; 7];
@@ -136,23 +181,41 @@ pub(crate) fn build_parameter_sets(
 
     let conformance_window_flag = coded_w != width || coded_h != height;
 
+    // W-F5: optional CICP colour description in the VUI. Absent ⇒ no VUI at all
+    // (byte-identical to the M7 Main encoder).
+    let (vui_parameters_present_flag, vui_parameters) = match config.color {
+        Some(c) => (
+            true,
+            VuiParams {
+                video_signal_type_present_flag: true,
+                video_full_range_flag: c.full_range,
+                colour_description_present_flag: true,
+                colour_primaries: c.primaries as u32,
+                transfer_characteristics: c.transfer as u32,
+                matrix_coeffs: c.matrix as u32,
+                ..Default::default()
+            },
+        ),
+        None => (false, VuiParams::default()),
+    };
+
     let sps = Sps {
         video_parameter_set_id: 0,
         max_sub_layers_minus1: 0,
         temporal_id_nesting_flag: true,
         profile_tier_level: ptl.clone(),
         seq_parameter_set_id: 0,
-        chroma_format_idc: 1,
+        chroma_format_idc,
         separate_colour_plane_flag: false,
         pic_width_in_luma_samples: coded_w as u16,
         pic_height_in_luma_samples: coded_h as u16,
         conformance_window_flag,
         conf_win_left_offset: 0,
-        conf_win_right_offset: (coded_w - width) / SUB_WIDTH_C,
+        conf_win_right_offset: (coded_w - width) / sub_width_c,
         conf_win_top_offset: 0,
-        conf_win_bottom_offset: (coded_h - height) / SUB_HEIGHT_C,
-        bit_depth_luma_minus8: 0,
-        bit_depth_chroma_minus8: 0,
+        conf_win_bottom_offset: (coded_h - height) / sub_height_c,
+        bit_depth_luma_minus8: bit_depth_minus8,
+        bit_depth_chroma_minus8: bit_depth_minus8,
         log2_max_pic_order_cnt_lsb_minus4: log2_max_poc_lsb_minus4,
         sub_layer_ordering_info_present_flag: true,
         max_dec_pic_buffering_minus1,
@@ -175,10 +238,11 @@ pub(crate) fn build_parameter_sets(
         long_term_ref_pics_present_flag: false,
         temporal_mvp_enabled_flag: false,
         strong_intra_smoothing_enabled_flag: false,
-        vui_parameters_present_flag: false,
+        vui_parameters_present_flag,
+        vui_parameters,
         extension_present_flag: false,
         // Computed fields the synthesizer / backend read.
-        chroma_array_type: 1,
+        chroma_array_type: chroma_format_idc,
         min_cb_log2_size_y: MIN_CB_LOG2,
         ctb_log2_size_y: CTB_LOG2,
         ctb_size_y: CTB_SIZE,

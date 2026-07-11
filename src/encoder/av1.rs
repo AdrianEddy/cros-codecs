@@ -4,6 +4,7 @@
 
 use crate::codec::av1::parser::BitDepth;
 use crate::codec::av1::parser::Profile;
+use crate::encoder::EncoderColorInfo;
 use crate::encoder::PredictionStructure;
 use crate::encoder::Tunings;
 use crate::Resolution;
@@ -18,6 +19,10 @@ pub struct EncoderConfig {
     pub pred_structure: PredictionStructure,
     /// Initial tunings values
     pub initial_tunings: Tunings,
+    /// Optional CICP colour description threaded into the sequence header OBU
+    /// `color_config` (color_primaries/transfer/matrix + color_range). `None` ⇒
+    /// `color_description_present_flag == 0` (byte-identical to the M6 encoder).
+    pub color: Option<EncoderColorInfo>,
 }
 
 impl Default for EncoderConfig {
@@ -29,6 +34,7 @@ impl Default for EncoderConfig {
             resolution: Resolution { width: 320, height: 240 },
             pred_structure: PredictionStructure::LowDelay { limit: 1024 },
             initial_tunings: Default::default(),
+            color: None,
         }
     }
 }

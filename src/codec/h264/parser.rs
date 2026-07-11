@@ -1165,6 +1165,27 @@ impl SpsBuilder {
         self
     }
 
+    /// Sets the VUI `video_signal_type` block: `video_full_range_flag` plus a
+    /// full `colour_description` (`colour_primaries` / `transfer_characteristics`
+    /// / `matrix_coefficients`, all CICP code points). `video_format` is left at
+    /// its "Unspecified" default (5). Enables the VUI if it was not already on.
+    pub fn video_signal_type(
+        mut self,
+        full_range: bool,
+        colour_primaries: u8,
+        transfer_characteristics: u8,
+        matrix_coefficients: u8,
+    ) -> Self {
+        self = self.vui_parameters_present();
+        self.0.vui_parameters.video_signal_type_present_flag = true;
+        self.0.vui_parameters.video_full_range_flag = full_range;
+        self.0.vui_parameters.colour_description_present_flag = true;
+        self.0.vui_parameters.colour_primaries = colour_primaries;
+        self.0.vui_parameters.transfer_characteristics = transfer_characteristics;
+        self.0.vui_parameters.matrix_coefficients = matrix_coefficients;
+        self
+    }
+
     pub fn log2_max_frame_num_minus4(mut self, value: u8) -> Self {
         self.0.log2_max_frame_num_minus4 = value;
         self

@@ -5,8 +5,11 @@
 use crate::codec::av1::parser::BitDepth;
 use crate::codec::av1::parser::CdefParams;
 use crate::codec::av1::parser::ColorConfig;
+use crate::codec::av1::parser::ColorPrimaries;
 use crate::codec::av1::parser::FrameHeaderObu;
 use crate::codec::av1::parser::FrameType;
+use crate::codec::av1::parser::MatrixCoefficients;
+use crate::codec::av1::parser::TransferCharacteristics;
 use crate::codec::av1::parser::ObuHeader;
 use crate::codec::av1::parser::ObuType;
 use crate::codec::av1::parser::OperatingPoint;
@@ -71,6 +74,35 @@ impl<Picture, Reference> LowDelayAV1<Picture, Reference> {
         let width = config.resolution.width;
         let height = config.resolution.height;
 
+        // W-F5: optional CICP colour description in `color_config`. Absent ⇒
+        // `color_description_present_flag == 0` with primaries/transfer/matrix
+        // left Unspecified — the exact combination the synthesizer requires when
+        // the flag is 0, so 8-bit/10-bit streams without colour stay byte-identical.
+        let (
+            color_description_present_flag,
+            color_primaries,
+            transfer_characteristics,
+            matrix_coefficients,
+            color_range,
+        ) = match config.color {
+            Some(c) => (
+                true,
+                ColorPrimaries::try_from(c.primaries as u32).unwrap_or(ColorPrimaries::Unspecified),
+                TransferCharacteristics::try_from(c.transfer as u32)
+                    .unwrap_or(TransferCharacteristics::Unspecified),
+                MatrixCoefficients::try_from(c.matrix as u32)
+                    .unwrap_or(MatrixCoefficients::Unspecified),
+                c.full_range,
+            ),
+            None => (
+                false,
+                ColorPrimaries::Unspecified,
+                TransferCharacteristics::Unspecified,
+                MatrixCoefficients::Unspecified,
+                false,
+            ),
+        };
+
         SequenceHeaderObu {
             obu_header: ObuHeader {
                 obu_type: ObuType::SequenceHeader,
@@ -113,6 +145,11 @@ impl<Picture, Reference> LowDelayAV1<Picture, Reference> {
                 mono_chrome: false,
                 subsampling_x: true,
                 subsampling_y: true,
+                color_description_present_flag,
+                color_primaries,
+                transfer_characteristics,
+                matrix_coefficients,
+                color_range,
                 ..Default::default()
             },
 
