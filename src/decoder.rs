@@ -12,12 +12,44 @@
 pub mod stateless;
 
 use std::collections::VecDeque;
+#[cfg(any(target_os = "linux", target_os = "android"))]
 use std::os::fd::AsFd;
+#[cfg(any(target_os = "linux", target_os = "android"))]
 use std::os::fd::BorrowedFd;
 use std::sync::Arc;
 
+#[cfg(any(target_os = "linux", target_os = "android"))]
 use nix::errno::Errno;
+#[cfg(any(target_os = "linux", target_os = "android"))]
 use nix::sys::eventfd::EventFd;
+#[cfg(not(any(target_os = "linux", target_os = "android")))]
+pub(crate) use event_signal_stub::{Errno, EventFd};
+
+/// No-op stand-in for the eventfd-based readiness signaling on platforms
+/// without eventfd/epoll (e.g. Windows). Consumers there drive the decoder
+/// with the synchronous `next_event()` pull; no pollable readiness fd is
+/// exposed (`poll_fd()`/`wait_for_next_event()` are Linux/Android-only).
+#[cfg(not(any(target_os = "linux", target_os = "android")))]
+pub(crate) mod event_signal_stub {
+    pub(crate) type Errno = std::convert::Infallible;
+
+    #[derive(Debug)]
+    pub(crate) struct EventFd;
+
+    impl EventFd {
+        pub(crate) fn new() -> Result<Self, Errno> {
+            Ok(EventFd)
+        }
+
+        pub(crate) fn write(&self, _value: u64) -> Result<usize, Errno> {
+            Ok(0)
+        }
+
+        pub(crate) fn read(&self) -> Result<u64, Errno> {
+            Ok(0)
+        }
+    }
+}
 
 pub use crate::BlockingMode;
 
@@ -198,6 +230,7 @@ impl<T> ReadyFramesQueue<T> {
 
     /// Returns a file descriptor that signals `POLLIN` whenever an event is available on this
     /// queue.
+    #[cfg(any(target_os = "linux", target_os = "android"))]
     pub fn poll_fd(&self) -> BorrowedFd {
         self.poll_fd.as_fd()
     }
@@ -232,7 +265,8 @@ impl<T> Iterator for ReadyFramesQueue<T> {
     }
 }
 
-#[cfg(test)]
+// The tests exercise the epoll/eventfd readiness signaling itself.
+#[cfg(all(test, any(target_os = "linux", target_os = "android")))]
 mod tests {
     use nix::sys::epoll::Epoll;
     use nix::sys::epoll::EpollCreateFlags;

@@ -7,7 +7,9 @@ mod v4l2;
 #[cfg(feature = "vaapi")]
 mod vaapi;
 
+#[cfg(any(target_os = "linux", target_os = "android"))]
 use std::os::fd::AsFd;
+#[cfg(any(target_os = "linux", target_os = "android"))]
 use std::os::fd::BorrowedFd;
 
 use crate::codec::vp8::parser::Frame;
@@ -305,6 +307,7 @@ where
         self.backend.stream_info()
     }
 
+    #[cfg(any(target_os = "linux", target_os = "android"))]
     fn poll_fd(&self) -> BorrowedFd {
         self.epoll_fd.0.as_fd()
     }

@@ -43,57 +43,57 @@ pub enum IsReference {
 #[derive(Clone, Debug)]
 pub struct DpbEntryMeta {
     /// Picture order count
-    poc: u16,
-    frame_num: u32,
-    is_reference: IsReference,
+    pub poc: u16,
+    pub frame_num: u32,
+    pub is_reference: IsReference,
 }
 
 /// Frame structure used in the backend representing currently encoded frame or references used
 /// for its encoding.
 pub struct DpbEntry<R> {
     /// Reconstructed picture
-    recon_pic: R,
+    pub recon_pic: R,
     /// Decoded picture buffer entry metadata
-    meta: DpbEntryMeta,
+    pub meta: DpbEntryMeta,
 }
 
 /// Stateless H.264 encoder backend input.
 pub struct BackendRequest<P, R> {
-    sps: Rc<Sps>,
-    pps: Rc<Pps>,
-    header: SliceHeader,
+    pub sps: Rc<Sps>,
+    pub pps: Rc<Pps>,
+    pub header: SliceHeader,
 
     /// Input frame to be encoded
-    input: P,
+    pub input: P,
 
     /// Input frame metadata
-    input_meta: FrameMetadata,
+    pub input_meta: FrameMetadata,
 
     /// DPB entry metadata
-    dpb_meta: DpbEntryMeta,
+    pub dpb_meta: DpbEntryMeta,
 
     /// Reference lists
-    ref_list_0: Vec<Rc<DpbEntry<R>>>,
-    ref_list_1: Vec<Rc<DpbEntry<R>>>,
+    pub ref_list_0: Vec<Rc<DpbEntry<R>>>,
+    pub ref_list_1: Vec<Rc<DpbEntry<R>>>,
 
     /// Period between intra frames
-    intra_period: u32,
+    pub intra_period: u32,
 
     /// Period between intra frame and P frame
-    ip_period: u32,
+    pub ip_period: u32,
 
     /// Number of macroblock to be encoded in slice
-    num_macroblocks: usize,
+    pub num_macroblocks: usize,
 
     /// True whenever the result is IDR
-    is_idr: bool,
+    pub is_idr: bool,
 
     /// [`Tunings`] for the frame
-    tunings: Tunings,
+    pub tunings: Tunings,
 
     /// Container for the request output. [`StatelessH264EncoderBackend`] impl shall move it and
     /// append the slice data to it. This prevents unnecessary copying of bitstream around.
-    coded_output: Vec<u8>,
+    pub coded_output: Vec<u8>,
 }
 
 /// Wrapper type for [`BackendPromise<Output = R>`], with additional
@@ -191,7 +191,11 @@ where
     Backend: StatelessH264EncoderBackend,
     Backend: StatelessEncoderBackendImport<Handle, Backend::Picture>,
 {
-    fn new_h264(backend: Backend, config: EncoderConfig, mode: BlockingMode) -> EncodeResult<Self> {
+    pub fn new_h264(
+        backend: Backend,
+        config: EncoderConfig,
+        mode: BlockingMode,
+    ) -> EncodeResult<Self> {
         let predictor: Box<dyn Predictor<_, _, _>> = match config.pred_structure {
             PredictionStructure::LowDelay { limit } => Box::new(LowDelayH264::new(config, limit)),
         };

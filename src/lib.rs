@@ -25,7 +25,10 @@ pub mod codec;
 
 #[cfg(feature = "backend")]
 pub mod backend;
-#[cfg(feature = "backend")]
+// The C2 (Codec2) wrapper drives a concrete accelerator end to end — its
+// internals (AuxiliaryVideoFrame, C2EncoderWorker::encoder, ...) exist only
+// under vaapi/v4l2, so gating it on plain `backend` breaks that build.
+#[cfg(any(feature = "vaapi", feature = "v4l2"))]
 pub mod c2_wrapper;
 #[cfg(feature = "backend")]
 pub mod decoder;

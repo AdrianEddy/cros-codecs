@@ -36,6 +36,7 @@ fn config(color: Option<EncoderColorInfo>) -> EncoderConfig {
         pred_structure: PredictionStructure::LowDelay { limit: 30 },
         initial_tunings: Tunings::default(),
         color,
+        emit_parameter_sets: true,
     }
 }
 
@@ -99,6 +100,32 @@ fn cicp_colour_survives_round_trip() {
     assert_eq!(vui.transfer_characteristics, 1);
     assert_eq!(vui.matrix_coefficients, 1);
     assert_eq!(synth_sps(&sps), synth_sps(&parsed), "SPS byte-idempotence");
+}
+
+#[test]
+fn emit_parameter_sets_off_yields_empty_coded_output_on_idr() {
+    // With `emit_parameter_sets = false` (backend owns the parameter sets),
+    // even the IDR request must leave `coded_output` empty — the predictor
+    // synthesizes no SPS/PPS, so the backend is free to prepend the
+    // driver-authoritative header bytes.
+    let mut cfg = config(None);
+    cfg.emit_parameter_sets = false;
+    let mut pred: LowDelayH264<(), ()> = LowDelayH264::new(cfg, 30);
+    let idr = pred.request_keyframe((), frame_meta(0), true).unwrap();
+    assert!(idr.is_idr);
+    assert!(idr.coded_output.is_empty(), "IDR coded_output must be empty when emit_parameter_sets is off");
+    // A following inter frame is likewise parameter-set-free.
+    let inter = pred.request_interframe((), frame_meta(1)).unwrap();
+    assert!(inter.coded_output.is_empty(), "inter coded_output must be empty when emit_parameter_sets is off");
+}
+
+#[test]
+fn emit_parameter_sets_on_writes_sps_pps_on_idr() {
+    // The default (`emit_parameter_sets = true`) still writes SPS+PPS in-band on
+    // IDR — the historical behaviour the VAAPI lane relies on.
+    let mut pred: LowDelayH264<(), ()> = LowDelayH264::new(config(None), 30);
+    let idr = pred.request_keyframe((), frame_meta(0), true).unwrap();
+    assert!(!idr.coded_output.is_empty(), "IDR coded_output carries the in-band SPS/PPS by default");
 }
 
 #[test]

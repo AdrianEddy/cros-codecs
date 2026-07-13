@@ -36,25 +36,25 @@ pub enum ReferenceUse {
 }
 
 pub struct BackendRequest<P, R> {
-    header: Header,
+    pub header: Header,
 
     /// Input frame to be encoded
-    input: P,
+    pub input: P,
 
     /// Input frame metadata
-    input_meta: FrameMetadata,
+    pub input_meta: FrameMetadata,
 
     /// Reference frames
-    last_frame_ref: Option<(Rc<R>, ReferenceUse)>,
-    golden_frame_ref: Option<(Rc<R>, ReferenceUse)>,
-    altref_frame_ref: Option<(Rc<R>, ReferenceUse)>,
+    pub last_frame_ref: Option<(Rc<R>, ReferenceUse)>,
+    pub golden_frame_ref: Option<(Rc<R>, ReferenceUse)>,
+    pub altref_frame_ref: Option<(Rc<R>, ReferenceUse)>,
 
     /// [`Tunings`] for the frame
-    tunings: Tunings,
+    pub tunings: Tunings,
 
     /// Container for the request output. [`StatelessVP9EncoderBackend`] impl shall move it and
     /// append the slice data to it. This prevents unnecessary copying of bitstream around.
-    coded_output: Vec<u8>,
+    pub coded_output: Vec<u8>,
 }
 
 impl<Backend> StatelessCodec<Backend> for VP9
@@ -112,7 +112,11 @@ impl<Handle, Backend> StatelessEncoder<Handle, Backend>
 where
     Backend: StatelessVP9EncoderBackend,
 {
-    fn new_vp9(backend: Backend, config: EncoderConfig, mode: BlockingMode) -> EncodeResult<Self> {
+    pub fn new_vp9(
+        backend: Backend,
+        config: EncoderConfig,
+        mode: BlockingMode,
+    ) -> EncodeResult<Self> {
         let predictor: Box<dyn Predictor<_, _, _>> = match config.pred_structure {
             PredictionStructure::LowDelay { limit } => Box::new(LowDelayVP9::new(config, limit)),
         };

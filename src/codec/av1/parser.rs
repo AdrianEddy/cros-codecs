@@ -1043,6 +1043,13 @@ pub struct FrameHeaderObu {
     pub mi_cols: u32,
     pub mi_rows: u32,
     pub header_bytes: usize,
+    /// The byte-exact coded uncompressed-header bytes (the first `header_bytes` of
+    /// the OBU payload). Exposed for stateless backends (e.g. the Vulkan Video
+    /// lane) that must place a frame-header OBU in the decode buffer at
+    /// `frameHeaderOffset` but are handed only the parsed header, not raw bytes —
+    /// re-serializing via the synthesizer is lossy because the parser leaves some
+    /// derived syntax elements unset. Empty for a `show_existing_frame` header.
+    pub obu_header_bytes: Vec<u8>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -1449,6 +1456,28 @@ pub struct Parser {
     pub last_frame_header: Option<FrameHeaderObu>,
     /// The last SequenceHeaderObu parsed.
     pub sequence_header: Option<Rc<SequenceHeaderObu>>,
+}
+
+/// Build a self-contained `OBU_FRAME_HEADER` payload from the first
+/// `header_end_bits` bits of an OBU_FRAME payload (the uncompressed header, before
+/// the tile group), appending the AV1 `trailing_one_bit` + byte-alignment zeros
+/// (5.3.4). Used to expose a valid standalone frame-header payload from an
+/// OBU_FRAME (see [`FrameHeaderObu::obu_header_bytes`]). Bit order is MSB-first.
+fn trail_uncompressed_header(data: &[u8], header_end_bits: usize) -> Vec<u8> {
+    let full = header_end_bits / 8;
+    let rem = header_end_bits % 8;
+    let mut out = data[..full].to_vec();
+    if rem == 0 {
+        // The header ends byte-aligned: the trailing_one_bit starts a fresh byte.
+        out.push(0x80);
+    } else {
+        // Keep the top `rem` header bits of the straddling byte, place the
+        // trailing_one_bit immediately after them, zero the rest.
+        let keep = data[full] & (0xffu8 << (8 - rem));
+        let one = 1u8 << (7 - rem);
+        out.push(keep | one);
+    }
+    out
 }
 
 impl Parser {
@@ -3774,12 +3803,33 @@ impl Parser {
 
         Self::skip_and_check_trailing_bits(&mut r, obu)?;
 
+        // The bit position at the end of the uncompressed header. For an
+        // OBU_FRAME_HEADER this already includes the trailing bits (consumed by
+        // `skip_and_check_trailing_bits`) and is byte-aligned; for an OBU_FRAME the
+        // tile group follows immediately, so the header is not yet trailed.
+        let header_end_bits = usize::try_from(r.0.position()).unwrap();
+
         // See 5.10
         if matches!(obu.header.obu_type, ObuType::Frame) {
             r.byte_alignment()?;
         }
 
         fh.header_bytes = usize::try_from(r.0.position() / 8).unwrap();
+
+        // Capture a byte-exact, self-contained `OBU_FRAME_HEADER` payload
+        // (uncompressed header + AV1 trailing bits) for stateless backends (e.g. the
+        // Vulkan Video lane) that must emit a frame-header OBU into the decode buffer
+        // at `frameHeaderOffset` but are handed only the parsed header — the parser
+        // leaves some derived syntax elements unset, so re-serialization is lossy.
+        // An OBU_FRAME_HEADER's payload is already properly trailed; an OBU_FRAME's
+        // header ends un-trailed (the tile group follows), so a `trailing_one_bit`
+        // and byte alignment are appended to form a valid standalone header payload.
+        fh.obu_header_bytes = if matches!(obu.header.obu_type, ObuType::Frame) {
+            trail_uncompressed_header(obu.data.as_ref(), header_end_bits)
+        } else {
+            obu.data[..fh.header_bytes].to_vec()
+        };
+
         Ok(fh)
     }
 

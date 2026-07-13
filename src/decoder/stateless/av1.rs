@@ -2,7 +2,9 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#[cfg(any(target_os = "linux", target_os = "android"))]
 use std::os::fd::AsFd;
+#[cfg(any(target_os = "linux", target_os = "android"))]
 use std::os::fd::BorrowedFd;
 
 use anyhow::anyhow;
@@ -77,6 +79,17 @@ pub trait StatelessAV1DecoderBackend:
     /// operations for `picture`. At this point, `decode_tile` has been called
     /// for all tiles.
     fn submit_picture(&mut self, picture: Self::Picture) -> StatelessBackendResult<Self::Handle>;
+
+    /// Called when a `show_existing_frame` triggers a reference-frame-store refresh
+    /// — its shown frame is a `KEY_FRAME`, so `refresh_frame_flags == allFrames` and
+    /// [`submit_frame`](StatelessDecoder::submit_frame) rotates every
+    /// `reference_frames[i]` to the shown handle. A `show_existing_frame` never
+    /// reaches [`new_picture`](StatelessAV1DecoderBackend::new_picture) /
+    /// [`begin_picture`](StatelessAV1DecoderBackend::begin_picture) /
+    /// [`submit_picture`](StatelessAV1DecoderBackend::submit_picture), so a backend
+    /// that mirrors per-reference metadata alongside the DPB uses this hook to keep
+    /// that mirror in lock-step with the reference-store rotation. No-op by default.
+    fn show_existing_frame_refresh(&mut self, _hdr: &FrameHeaderObu) {}
 }
 
 /// State of the picture being currently decoded.
@@ -256,6 +269,13 @@ where
         };
 
         if update_refs {
+            if header.show_existing_frame {
+                // A show_existing_frame bypasses submit_picture (the backend never
+                // sees it), yet still refreshes the reference-frame store below; let
+                // the backend mirror that refresh before the rotation runs.
+                self.backend.show_existing_frame_refresh(&header);
+            }
+
             let mut refresh_frame_flags = header.refresh_frame_flags;
 
             #[allow(clippy::needless_range_loop)]
@@ -506,6 +526,7 @@ where
         })
     }
 
+    #[cfg(any(target_os = "linux", target_os = "android"))]
     fn poll_fd(&self) -> BorrowedFd {
         self.epoll_fd.0.as_fd()
     }

@@ -16,9 +16,11 @@ use crate::Fourcc;
 use crate::Resolution;
 
 pub mod frame_pool;
-#[cfg(feature = "backend")]
+// GBM and dma-buf are kernel interfaces — these frame types cannot exist on
+// non-Linux targets even with `backend` enabled.
+#[cfg(target_os = "linux")]
 pub mod gbm_video_frame;
-#[cfg(feature = "backend")]
+#[cfg(any(target_os = "linux", target_os = "android"))]
 pub mod generic_dma_video_frame;
 #[cfg(feature = "v4l2")]
 pub mod v4l2_mmap_video_frame;

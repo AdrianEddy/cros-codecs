@@ -37,6 +37,9 @@ impl<V: VideoFrame> VideoFrame for PooledVideoFrame<V> {
     #[cfg(feature = "vaapi")]
     type MemDescriptor = V::MemDescriptor;
 
+    // The trait only declares `NativeHandle` when a concrete backend (vaapi/
+    // v4l2) is enabled; mirror that gating or `backend`-only builds break.
+    #[cfg(any(feature = "vaapi", feature = "v4l2"))]
     type NativeHandle = V::NativeHandle;
 
     fn fourcc(&self) -> Fourcc {

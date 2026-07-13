@@ -7,7 +7,9 @@ mod vaapi;
 
 use std::cell::RefCell;
 use std::io::Cursor;
+#[cfg(any(target_os = "linux", target_os = "android"))]
 use std::os::fd::AsFd;
+#[cfg(any(target_os = "linux", target_os = "android"))]
 use std::os::fd::BorrowedFd;
 use std::rc::Rc;
 
@@ -153,6 +155,108 @@ pub struct RefPicSet<T> {
     ref_pic_set_st_curr_before: [Option<DpbEntry<T>>; MAX_DPB_SIZE],
     ref_pic_set_st_foll: [Option<DpbEntry<T>>; MAX_DPB_SIZE],
     ref_pic_set_lt_foll: [Option<DpbEntry<T>>; MAX_DPB_SIZE],
+}
+
+/// Public, read-only accessors over the derived RefPicSet state.
+///
+/// The RefPicSet is fully derived by the decoder core per spec clause 8.3.2
+/// (`curr_delta_poc_msb_present_flag`, the `NumPoc*` counts, the `poc_*`
+/// arrays, and the materialized `ref_pic_set_*` DPB-entry arrays). A stateless
+/// backend that is NOT a child module of this file (e.g. an out-of-tree Vulkan
+/// Video backend) needs these values to fill the Khronos StdVideo H.265
+/// picture-info reference index arrays (`RefPicSetStCurrBefore[8]`,
+/// `RefPicSetStCurrAfter[8]`, `RefPicSetLtCurr[8]`) with DPB **slot indices**,
+/// and the LT MSB-present flags. Re-deriving 8.3.2 backend-side would duplicate
+/// ~100 lines of verified spec logic, so the derived state is exposed directly.
+///
+/// Slices are length `MAX_DPB_SIZE`; only the first `num_poc_*` entries of each
+/// array are meaningful (the remainder are `Default`/`None`). `DpbEntry`'s
+/// second tuple field is the backend handle, from which a backend recovers its
+/// own DPB slot index.
+impl<T> RefPicSet<T> {
+    /// `NumPocStCurrBefore` — count of valid `ref_pic_set_st_curr_before` /
+    /// `poc_st_curr_before` entries.
+    pub fn num_poc_st_curr_before(&self) -> usize {
+        self.num_poc_st_curr_before
+    }
+    /// `NumPocStCurrAfter` — count of valid `ref_pic_set_st_curr_after` /
+    /// `poc_st_curr_after` entries.
+    pub fn num_poc_st_curr_after(&self) -> usize {
+        self.num_poc_st_curr_after
+    }
+    /// `NumPocStFoll` — count of valid `ref_pic_set_st_foll` / `poc_st_foll`
+    /// entries.
+    pub fn num_poc_st_foll(&self) -> usize {
+        self.num_poc_st_foll
+    }
+    /// `NumPocLtCurr` — count of valid `ref_pic_set_lt_curr` / `poc_lt_curr`
+    /// entries.
+    pub fn num_poc_lt_curr(&self) -> usize {
+        self.num_poc_lt_curr
+    }
+    /// `NumPocLtFoll` — count of valid `ref_pic_set_lt_foll` / `poc_lt_foll`
+    /// entries.
+    pub fn num_poc_lt_foll(&self) -> usize {
+        self.num_poc_lt_foll
+    }
+
+    /// `PocStCurrBefore` — `PicOrderCnt` values; first `num_poc_st_curr_before`
+    /// valid.
+    pub fn poc_st_curr_before(&self) -> &[i32] {
+        &self.poc_st_curr_before
+    }
+    /// `PocStCurrAfter` — `PicOrderCnt` values; first `num_poc_st_curr_after`
+    /// valid.
+    pub fn poc_st_curr_after(&self) -> &[i32] {
+        &self.poc_st_curr_after
+    }
+    /// `PocStFoll` — `PicOrderCnt` values; first `num_poc_st_foll` valid.
+    pub fn poc_st_foll(&self) -> &[i32] {
+        &self.poc_st_foll
+    }
+    /// `PocLtCurr` — `PicOrderCnt` values; first `num_poc_lt_curr` valid.
+    pub fn poc_lt_curr(&self) -> &[i32] {
+        &self.poc_lt_curr
+    }
+    /// `PocLtFoll` — `PicOrderCnt` values; first `num_poc_lt_foll` valid.
+    pub fn poc_lt_foll(&self) -> &[i32] {
+        &self.poc_lt_foll
+    }
+
+    /// `RefPicSetStCurrBefore` — DPB entries; first `num_poc_st_curr_before`
+    /// are `Some`.
+    pub fn ref_pic_set_st_curr_before(&self) -> &[Option<DpbEntry<T>>] {
+        &self.ref_pic_set_st_curr_before
+    }
+    /// `RefPicSetStCurrAfter` — DPB entries; first `num_poc_st_curr_after` are
+    /// `Some`.
+    pub fn ref_pic_set_st_curr_after(&self) -> &[Option<DpbEntry<T>>] {
+        &self.ref_pic_set_st_curr_after
+    }
+    /// `RefPicSetStFoll` — DPB entries; first `num_poc_st_foll` are `Some`.
+    pub fn ref_pic_set_st_foll(&self) -> &[Option<DpbEntry<T>>] {
+        &self.ref_pic_set_st_foll
+    }
+    /// `RefPicSetLtCurr` — DPB entries; first `num_poc_lt_curr` are `Some`.
+    pub fn ref_pic_set_lt_curr(&self) -> &[Option<DpbEntry<T>>] {
+        &self.ref_pic_set_lt_curr
+    }
+    /// `RefPicSetLtFoll` — DPB entries; first `num_poc_lt_foll` are `Some`.
+    pub fn ref_pic_set_lt_foll(&self) -> &[Option<DpbEntry<T>>] {
+        &self.ref_pic_set_lt_foll
+    }
+
+    /// `CurrDeltaPocMsbPresentFlag` — per long-term reference of the **current**
+    /// picture, whether `delta_poc_msb_cycle_lt` was present (StdVideo H.265
+    /// `delta_poc_msb_present_flag`). Indexed like the LT reference lists.
+    pub fn curr_delta_poc_msb_present_flag(&self) -> &[bool] {
+        &self.curr_delta_poc_msb_present_flag
+    }
+    /// `FollDeltaPocMsbPresentFlag` — the follow-set twin of
+    /// [`Self::curr_delta_poc_msb_present_flag`].
+    pub fn foll_delta_poc_msb_present_flag(&self) -> &[bool] {
+        &self.foll_delta_poc_msb_present_flag
+    }
 }
 
 impl<T> RefPicSet<T>
@@ -1214,7 +1318,115 @@ where
         self.backend.stream_info()
     }
 
+    #[cfg(any(target_os = "linux", target_os = "android"))]
     fn poll_fd(&self) -> BorrowedFd {
         self.epoll_fd.0.as_fd()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::codec::h265::picture::PictureData;
+
+    /// A DPB entry carrying `handle` in its backend-handle slot (`.1`). The
+    /// `PictureData` payload is irrelevant to accessor mapping, so a `Default`
+    /// one suffices.
+    fn entry(handle: u32) -> DpbEntry<u32> {
+        DpbEntry(Rc::new(RefCell::new(PictureData::default())), handle)
+    }
+
+    /// Every public `RefPicSet` accessor returns the exact derived field it
+    /// names. Distinct sentinels per field catch any copy-paste mis-mapping
+    /// between an accessor and the wrong array/count.
+    #[test]
+    fn ref_pic_set_accessors_map_to_derived_fields() {
+        let mut rps = RefPicSet::<u32>::default();
+
+        rps.num_poc_st_curr_before = 1;
+        rps.num_poc_st_curr_after = 2;
+        rps.num_poc_st_foll = 3;
+        rps.num_poc_lt_curr = 4;
+        rps.num_poc_lt_foll = 5;
+
+        rps.poc_st_curr_before[0] = -11;
+        rps.poc_st_curr_after[0] = -22;
+        rps.poc_st_foll[0] = -33;
+        rps.poc_lt_curr[0] = -44;
+        rps.poc_lt_foll[0] = -55;
+
+        rps.ref_pic_set_st_curr_before[0] = Some(entry(100));
+        rps.ref_pic_set_st_curr_after[0] = Some(entry(200));
+        rps.ref_pic_set_st_foll[0] = Some(entry(300));
+        rps.ref_pic_set_lt_curr[0] = Some(entry(400));
+        rps.ref_pic_set_lt_foll[0] = Some(entry(500));
+
+        rps.curr_delta_poc_msb_present_flag[0] = true;
+        rps.curr_delta_poc_msb_present_flag[1] = false;
+        rps.foll_delta_poc_msb_present_flag[0] = false;
+        rps.foll_delta_poc_msb_present_flag[1] = true;
+
+        // Counts.
+        assert_eq!(rps.num_poc_st_curr_before(), 1);
+        assert_eq!(rps.num_poc_st_curr_after(), 2);
+        assert_eq!(rps.num_poc_st_foll(), 3);
+        assert_eq!(rps.num_poc_lt_curr(), 4);
+        assert_eq!(rps.num_poc_lt_foll(), 5);
+
+        // Every array is exposed at the full derivation width.
+        for len in [
+            rps.poc_st_curr_before().len(),
+            rps.poc_st_curr_after().len(),
+            rps.poc_st_foll().len(),
+            rps.poc_lt_curr().len(),
+            rps.poc_lt_foll().len(),
+            rps.ref_pic_set_st_curr_before().len(),
+            rps.ref_pic_set_st_curr_after().len(),
+            rps.ref_pic_set_st_foll().len(),
+            rps.ref_pic_set_lt_curr().len(),
+            rps.ref_pic_set_lt_foll().len(),
+            rps.curr_delta_poc_msb_present_flag().len(),
+            rps.foll_delta_poc_msb_present_flag().len(),
+        ] {
+            assert_eq!(len, MAX_DPB_SIZE);
+        }
+
+        // POC field mapping.
+        assert_eq!(rps.poc_st_curr_before()[0], -11);
+        assert_eq!(rps.poc_st_curr_after()[0], -22);
+        assert_eq!(rps.poc_st_foll()[0], -33);
+        assert_eq!(rps.poc_lt_curr()[0], -44);
+        assert_eq!(rps.poc_lt_foll()[0], -55);
+
+        // DPB-entry field mapping (`.1` is the backend handle a Vulkan backend
+        // reads its slot index out of).
+        assert_eq!(rps.ref_pic_set_st_curr_before()[0].as_ref().unwrap().1, 100);
+        assert_eq!(rps.ref_pic_set_st_curr_after()[0].as_ref().unwrap().1, 200);
+        assert_eq!(rps.ref_pic_set_st_foll()[0].as_ref().unwrap().1, 300);
+        assert_eq!(rps.ref_pic_set_lt_curr()[0].as_ref().unwrap().1, 400);
+        assert_eq!(rps.ref_pic_set_lt_foll()[0].as_ref().unwrap().1, 500);
+
+        // MSB-present flags.
+        assert!(rps.curr_delta_poc_msb_present_flag()[0]);
+        assert!(!rps.curr_delta_poc_msb_present_flag()[1]);
+        assert!(!rps.foll_delta_poc_msb_present_flag()[0]);
+        assert!(rps.foll_delta_poc_msb_present_flag()[1]);
+    }
+
+    /// A freshly-derived (empty) RefPicSet exposes zero counts, all-`None`
+    /// entries, and all-`false` MSB flags through the accessors.
+    #[test]
+    fn default_ref_pic_set_reads_empty() {
+        let rps = RefPicSet::<u32>::default();
+        assert_eq!(rps.num_poc_st_curr_before(), 0);
+        assert_eq!(rps.num_poc_st_curr_after(), 0);
+        assert_eq!(rps.num_poc_st_foll(), 0);
+        assert_eq!(rps.num_poc_lt_curr(), 0);
+        assert_eq!(rps.num_poc_lt_foll(), 0);
+        assert!(rps.ref_pic_set_st_curr_before().iter().all(Option::is_none));
+        assert!(rps.ref_pic_set_lt_curr().iter().all(Option::is_none));
+        assert!(rps.poc_st_curr_before().iter().all(|&p| p == 0));
+        assert!(rps.curr_delta_poc_msb_present_flag().iter().all(|&f| !f));
+        assert!(rps.foll_delta_poc_msb_present_flag().iter().all(|&f| !f));
     }
 }

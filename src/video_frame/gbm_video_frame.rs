@@ -34,10 +34,12 @@ use drm_fourcc::DrmFourcc;
 use gbm_sys::gbm_import_fd_data;
 #[cfg(feature = "vaapi")]
 use gbm_sys::gbm_import_fd_modifier_data;
+#[cfg(any(feature = "vaapi", feature = "v4l2"))]
+use gbm_sys::gbm_bo_import;
 use gbm_sys::{
     gbm_bo, gbm_bo_create, gbm_bo_destroy, gbm_bo_flags, gbm_bo_get_fd, gbm_bo_get_height,
     gbm_bo_get_modifier, gbm_bo_get_offset, gbm_bo_get_stride_for_plane, gbm_bo_get_width,
-    gbm_bo_import, gbm_bo_map, gbm_bo_transfer_flags, gbm_bo_unmap, gbm_create_device, gbm_device,
+    gbm_bo_map, gbm_bo_transfer_flags, gbm_bo_unmap, gbm_create_device, gbm_device,
     gbm_device_destroy,
 };
 #[cfg(feature = "vaapi")]

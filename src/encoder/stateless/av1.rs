@@ -34,38 +34,38 @@ mod tests;
 
 pub struct BackendRequest<P, R> {
     /// Current sequence's header OBU
-    sequence: SequenceHeaderObu,
+    pub sequence: SequenceHeaderObu,
 
     /// Current frame OBU contains
-    frame: FrameHeaderObu,
+    pub frame: FrameHeaderObu,
 
     /// Input frame to be encoded
-    input: P,
+    pub input: P,
 
     /// Input frame metadata
-    input_meta: FrameMetadata,
+    pub input_meta: FrameMetadata,
 
     /// References for the frame to be encoded
     /// Use `ReferenceFrameType::Golden - ReferenceFrameType::Last` for indexing
-    references: [Option<Rc<R>>; REFS_PER_FRAME],
+    pub references: [Option<Rc<R>>; REFS_PER_FRAME],
 
     /// The reference frame search priority list. From highest to lowest
     /// Use [`ReferenceFrameType::Intra`] for invalid
-    ref_frame_ctrl_l0: [ReferenceFrameType; REFS_PER_FRAME],
-    ref_frame_ctrl_l1: [ReferenceFrameType; REFS_PER_FRAME],
+    pub ref_frame_ctrl_l0: [ReferenceFrameType; REFS_PER_FRAME],
+    pub ref_frame_ctrl_l1: [ReferenceFrameType; REFS_PER_FRAME],
 
     /// Period between intra frames
-    intra_period: u32,
+    pub intra_period: u32,
 
     /// Period between intra frame and P frame
-    ip_period: u32,
+    pub ip_period: u32,
 
     /// [`Tunings`] for the frame
-    tunings: Tunings,
+    pub tunings: Tunings,
 
     /// Container for the request output. [`StatelessAV1EncoderBackend`] impl shall move it and
     /// append the slice data to it. This prevents unnecessary copying of bitstream around.
-    coded_output: Vec<u8>,
+    pub coded_output: Vec<u8>,
 }
 
 impl<Backend> StatelessCodec<Backend> for AV1
@@ -127,7 +127,11 @@ impl<Handle, Backend> StatelessEncoder<Handle, Backend>
 where
     Backend: StatelessAV1EncoderBackend,
 {
-    fn new_av1(backend: Backend, config: EncoderConfig, mode: BlockingMode) -> EncodeResult<Self> {
+    pub fn new_av1(
+        backend: Backend,
+        config: EncoderConfig,
+        mode: BlockingMode,
+    ) -> EncodeResult<Self> {
         let predictor: Box<dyn Predictor<_, _, _>> = match config.pred_structure {
             PredictionStructure::LowDelay { limit } => Box::new(LowDelayAV1::new(config, limit)),
         };

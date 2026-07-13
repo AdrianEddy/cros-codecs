@@ -14,15 +14,15 @@ use crate::encoder::Tunings;
 use crate::encoder::VideoEncoder;
 use crate::BlockingMode;
 
-#[cfg(feature = "vaapi")]
+// The per-codec modules are accelerator-neutral (predictor, BackendRequest,
+// blanket StatelessCodec/StatelessEncoderExecute impls) — only their `vaapi`
+// submodules are VA-API-specific, and those carry their own cfg gates. Keep
+// this layer available to plain-`backend` builds so external encoder
+// backends can be implemented against it.
 pub mod av1;
-#[cfg(feature = "vaapi")]
 pub mod h264;
-#[cfg(feature = "vaapi")]
 pub mod h265;
-#[cfg(feature = "vaapi")]
 pub(crate) mod predictor;
-#[cfg(feature = "vaapi")]
 pub mod vp9;
 
 #[derive(Error, Debug)]
@@ -330,6 +330,32 @@ where
         }
 
         Ok(())
+    }
+
+    /// Return the oldest already-submitted coded output, **blocking** on exactly
+    /// that one frame if it is still in flight, then surfacing any other now-ready
+    /// outputs (and feeding reconstructed frames so the predictor keeps advancing)
+    /// without blocking. Returns `None` only when nothing has been submitted to the
+    /// backend yet (e.g. the predictor is still holding the frame).
+    ///
+    /// Unlike [`Self::drain`] (which blocking-drains the *entire* in-flight tail)
+    /// this advances the pipeline by exactly one frame, so a caller can cap the
+    /// number of in-flight frames — ensuring each backend's per-frame transient
+    /// resources (bitstream segment / feedback query) are read before they recycle
+    /// — while still keeping several frames overlapped on the timeline.
+    pub fn poll_blocking(&mut self) -> EncodeResult<Option<CodedBitstreamBuffer>> {
+        if let Some(coded) = self.coded_queue.pop_front() {
+            return Ok(Some(coded));
+        }
+        if !self.output_queue.is_empty() {
+            // Blocking-sync exactly the front (oldest) submitted promise.
+            if let Some(coded) = self.output_queue.poll(BlockingMode::Blocking)? {
+                self.coded_queue.push_back(coded);
+            }
+        }
+        // Surface any further already-ready outputs + feed recons (non-blocking).
+        self.poll_pending(BlockingMode::NonBlocking)?;
+        Ok(self.coded_queue.pop_front())
     }
 }
 

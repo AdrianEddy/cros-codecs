@@ -17,17 +17,29 @@ pub mod h265;
 pub mod vp8;
 pub mod vp9;
 
+#[cfg(any(target_os = "linux", target_os = "android"))]
 use std::os::fd::AsFd;
+#[cfg(any(target_os = "linux", target_os = "android"))]
 use std::os::fd::AsRawFd;
+#[cfg(any(target_os = "linux", target_os = "android"))]
 use std::os::fd::BorrowedFd;
+#[cfg(any(target_os = "linux", target_os = "android"))]
 use std::time::Duration;
 
+#[cfg(any(target_os = "linux", target_os = "android"))]
 use nix::errno::Errno;
+#[cfg(any(target_os = "linux", target_os = "android"))]
 use nix::sys::epoll::Epoll;
+#[cfg(any(target_os = "linux", target_os = "android"))]
 use nix::sys::epoll::EpollCreateFlags;
+#[cfg(any(target_os = "linux", target_os = "android"))]
 use nix::sys::epoll::EpollEvent;
+#[cfg(any(target_os = "linux", target_os = "android"))]
 use nix::sys::epoll::EpollFlags;
+#[cfg(any(target_os = "linux", target_os = "android"))]
 use nix::sys::eventfd::EventFd;
+#[cfg(not(any(target_os = "linux", target_os = "android")))]
+use crate::decoder::event_signal_stub::{Errno, EventFd};
 use thiserror::Error;
 
 use crate::decoder::BlockingMode;
@@ -112,6 +124,7 @@ impl From<NewPictureError> for DecodeError {
 }
 
 /// Error returned by the [`StatelessVideoDecoder::wait_for_next_event`] method.
+#[cfg(any(target_os = "linux", target_os = "android"))]
 #[derive(Debug, Error)]
 pub enum WaitNextEventError {
     #[error("timed out while waiting for next decoder event")]
@@ -202,6 +215,7 @@ pub trait StatelessVideoDecoder {
     ///
     /// Wait for the next event and return it, or return `None` if `timeout` has been reached while
     /// waiting.
+    #[cfg(any(target_os = "linux", target_os = "android"))]
     fn wait_for_next_event(&mut self, timeout: Duration) -> Result<(), WaitNextEventError> {
         // Wait until the next event is available.
         let mut fd = nix::libc::pollfd {
@@ -218,6 +232,7 @@ pub trait StatelessVideoDecoder {
 
     /// Returns a file descriptor that signals `POLLIN` whenever an event is pending on this
     /// decoder.
+    #[cfg(any(target_os = "linux", target_os = "android"))]
     fn poll_fd(&self) -> BorrowedFd;
 
     /// Transforms the decoder into a [`StatelessVideoDecoder`] trait object.
@@ -271,6 +286,7 @@ where
         })
     }
 
+    #[cfg(any(target_os = "linux", target_os = "android"))]
     fn poll_fd(&self) -> BorrowedFd {
         self.0.poll_fd()
     }
@@ -332,6 +348,7 @@ where
 
     /// Union of `awaiting_format_event` and `ready_queue` to signal whenever there is an event
     /// (frame ready or format change) pending.
+    #[cfg(any(target_os = "linux", target_os = "android"))]
     epoll_fd: Epoll,
 }
 
@@ -360,14 +377,18 @@ where
             ReadyFramesQueue::new().map_err(NewStatelessDecoderError::ReadyFramesQueue)?;
         let awaiting_format_event =
             EventFd::new().map_err(NewStatelessDecoderError::AwaitingFormatEventFd)?;
-        let epoll_fd =
-            Epoll::new(EpollCreateFlags::empty()).map_err(NewStatelessDecoderError::Epoll)?;
-        epoll_fd
-            .add(ready_queue.poll_fd(), EpollEvent::new(EpollFlags::EPOLLIN, 1))
-            .map_err(NewStatelessDecoderError::EpollAdd)?;
-        epoll_fd
-            .add(awaiting_format_event.as_fd(), EpollEvent::new(EpollFlags::EPOLLIN, 2))
-            .map_err(NewStatelessDecoderError::EpollAdd)?;
+        #[cfg(any(target_os = "linux", target_os = "android"))]
+        let epoll_fd = {
+            let epoll_fd =
+                Epoll::new(EpollCreateFlags::empty()).map_err(NewStatelessDecoderError::Epoll)?;
+            epoll_fd
+                .add(ready_queue.poll_fd(), EpollEvent::new(EpollFlags::EPOLLIN, 1))
+                .map_err(NewStatelessDecoderError::EpollAdd)?;
+            epoll_fd
+                .add(awaiting_format_event.as_fd(), EpollEvent::new(EpollFlags::EPOLLIN, 2))
+                .map_err(NewStatelessDecoderError::EpollAdd)?;
+            epoll_fd
+        };
 
         Ok(Self {
             backend,
@@ -377,6 +398,7 @@ where
             ready_queue,
             codec: Default::default(),
             awaiting_format_event,
+            #[cfg(any(target_os = "linux", target_os = "android"))]
             epoll_fd,
         })
     }

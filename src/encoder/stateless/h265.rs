@@ -43,7 +43,9 @@ mod predictor;
 #[cfg(feature = "vaapi")]
 pub mod vaapi;
 
-#[cfg(test)]
+// The tests assert VA-API decisions (packed headers, VA coding types) inline
+// with the predictor checks, so they need the vaapi backend.
+#[cfg(all(test, feature = "vaapi"))]
 #[path = "h265/tests.rs"]
 mod tests;
 
@@ -52,70 +54,70 @@ mod tests;
 #[derive(Clone, Debug)]
 pub struct DpbEntryMeta {
     /// Picture order count (the full value, not the LSB).
-    poc: i32,
+    pub poc: i32,
     /// The NAL unit type the reconstructed picture was coded as.
     #[allow(dead_code)]
-    nalu_type: NaluType,
+    pub nalu_type: NaluType,
 }
 
 /// Frame structure used in the backend representing currently encoded frame or references used
 /// for its encoding.
 pub struct DpbEntry<R> {
     /// Reconstructed picture
-    recon_pic: R,
+    pub recon_pic: R,
     /// Decoded picture buffer entry metadata
-    meta: DpbEntryMeta,
+    pub meta: DpbEntryMeta,
 }
 
 /// Stateless HEVC encoder backend input.
 pub struct BackendRequest<P, R> {
     /// The active video parameter set.
-    vps: Rc<Vps>,
+    pub vps: Rc<Vps>,
     /// The active sequence parameter set.
-    sps: Rc<Sps>,
+    pub sps: Rc<Sps>,
     /// The active picture parameter set.
-    pps: Rc<Pps>,
+    pub pps: Rc<Pps>,
     /// The slice segment header for the (single) slice. Carries the in-header
     /// short-term reference picture set (`header.short_term_ref_pic_set`, the
     /// trivial LowDelay form: one negative reference, `delta_poc_s0_minus1 == 0`).
-    header: SliceHeader,
+    pub header: SliceHeader,
     /// The NAL unit type of the coded slice (`IdrWRadl` / `TrailR`).
-    nalu_type: NaluType,
+    pub nalu_type: NaluType,
 
     /// Input frame to be encoded
-    input: P,
+    pub input: P,
 
     /// Input frame metadata
-    input_meta: FrameMetadata,
+    pub input_meta: FrameMetadata,
 
     /// DPB entry metadata
-    dpb_meta: DpbEntryMeta,
+    pub dpb_meta: DpbEntryMeta,
 
     /// Reference list 0 (LowDelay P uses list 0 only).
-    ref_list_0: Vec<Rc<DpbEntry<R>>>,
+    pub ref_list_0: Vec<Rc<DpbEntry<R>>>,
 
     /// Period between intra frames
-    intra_period: u32,
+    pub intra_period: u32,
 
     /// Period between intra frame and P frame
-    ip_period: u32,
+    pub ip_period: u32,
 
     /// Number of coding tree units to be encoded in the slice.
-    num_ctu_in_slice: u32,
+    pub num_ctu_in_slice: u32,
 
     /// True whenever the result is IDR (drives which application-packed headers
     /// the VA-API backend emits: VPS + SPS on IDR, PPS every frame).
-    is_idr: bool,
+    pub is_idr: bool,
 
     /// [`Tunings`] for the frame
-    tunings: Tunings,
+    pub tunings: Tunings,
 
     /// Container for the request output. The [`StatelessH265EncoderBackend`] impl
     /// moves it and appends the coded bitstream to it, avoiding a copy. For HEVC
     /// this is empty on entry — the parameter sets are supplied to the driver via
     /// application-packed headers (or self-generated), so they land directly in
     /// the driver's coded buffer rather than being prepended here.
-    coded_output: Vec<u8>,
+    pub coded_output: Vec<u8>,
 }
 
 /// Wrapper type for [`BackendPromise<Output = R>`], with additional metadata.
@@ -212,7 +214,11 @@ where
     Backend: StatelessH265EncoderBackend,
     Backend: StatelessEncoderBackendImport<Handle, Backend::Picture>,
 {
-    fn new_h265(backend: Backend, config: EncoderConfig, mode: BlockingMode) -> EncodeResult<Self> {
+    pub fn new_h265(
+        backend: Backend,
+        config: EncoderConfig,
+        mode: BlockingMode,
+    ) -> EncodeResult<Self> {
         let predictor: Box<dyn Predictor<_, _, _>> = match config.pred_structure {
             PredictionStructure::LowDelay { limit } => Box::new(LowDelayH265::new(config, limit)),
         };

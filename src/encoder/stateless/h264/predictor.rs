@@ -40,6 +40,12 @@ pub(crate) struct LowDelayH264Delegate {
     // True if SPS or PPS changed and should reappear in the bitstream
     update_params_sets: bool,
 
+    /// Whether SPS/PPS are synthesized into `coded_output` at all. When
+    /// `false` (backend owns the parameter sets — e.g. Vulkan Video), the
+    /// two synthesize sites below are skipped and `coded_output` stays empty of
+    /// parameter sets. Mirrored from [`EncoderConfig::emit_parameter_sets`].
+    emit_parameter_sets: bool,
+
     /// Encoder config
     config: EncoderConfig,
 }
@@ -60,6 +66,7 @@ impl<Picture, Reference> LowDelayH264<Picture, Reference> {
             limit,
             tunings: config.initial_tunings.clone(),
             delegate: LowDelayH264Delegate {
+                emit_parameter_sets: config.emit_parameter_sets,
                 config,
                 update_params_sets: false,
                 sps: None,
@@ -143,9 +150,19 @@ impl<Picture, Reference>
         input_meta: FrameMetadata,
         idr: bool,
     ) -> EncodeResult<BackendRequest<Picture, Reference>> {
+        // A user `force_keyframe` (the FrameMetadata flag) is promoted to a true
+        // IDR with a GOP reset — a seekable sync sample (fresh sequence, NAL 5,
+        // frame_num/poc = 0), not a mid-stream non-IDR I-frame. The shared
+        // predictor already cleared the reference list for this frame.
+        let idr = idr || input_meta.force_keyframe;
         if idr {
-            // Begin new sequence and start with I frame and no references.
+            // Begin new sequence and start with an IDR (I frame, no references).
             self.new_sequence();
+            // GOP reset: an IDR must carry frame_num = 0 / poc = 0. Rewind the
+            // predictor's GOP counter so this frame is frame 0 of the new sequence
+            // (the shared predictor increments it back to 1 after this request), so
+            // the next natural IDR is a full `limit` frames away.
+            self.counter = 0;
         }
 
         let sps = self.delegate.sps.clone().ok_or(EncodeError::InvalidInternalState)?;
@@ -165,8 +182,13 @@ impl<Picture, Reference>
 
         let mut headers = vec![];
         if idr || self.delegate.update_params_sets {
-            Synthesizer::<Sps, &mut Vec<u8>>::synthesize(3, &sps, &mut headers, true)?;
-            Synthesizer::<Pps, &mut Vec<u8>>::synthesize(3, &pps, &mut headers, true)?;
+            // Only synthesize the parameter sets when the backend does not
+            // own them (`emit_parameter_sets`). The dirty flag is still cleared so
+            // a backend-owned lane doesn't leave it perpetually set.
+            if self.delegate.emit_parameter_sets {
+                Synthesizer::<Sps, &mut Vec<u8>>::synthesize(3, &sps, &mut headers, true)?;
+                Synthesizer::<Pps, &mut Vec<u8>>::synthesize(3, &pps, &mut headers, true)?;
+            }
             self.delegate.update_params_sets = false;
         }
 
@@ -229,8 +251,11 @@ impl<Picture, Reference>
 
         let mut headers = Vec::new();
         if self.delegate.update_params_sets {
-            Synthesizer::<Sps, &mut Vec<u8>>::synthesize(3, &sps, &mut headers, true)?;
-            Synthesizer::<Pps, &mut Vec<u8>>::synthesize(3, &pps, &mut headers, true)?;
+            // Skip parameter-set synthesis when the backend owns them.
+            if self.delegate.emit_parameter_sets {
+                Synthesizer::<Sps, &mut Vec<u8>>::synthesize(3, &sps, &mut headers, true)?;
+                Synthesizer::<Pps, &mut Vec<u8>>::synthesize(3, &pps, &mut headers, true)?;
+            }
             self.delegate.update_params_sets = false;
         }
 

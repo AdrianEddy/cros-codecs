@@ -9,7 +9,9 @@ mod vaapi;
 
 use std::collections::btree_map::Entry;
 use std::io::Cursor;
+#[cfg(any(target_os = "linux", target_os = "android"))]
 use std::os::fd::AsFd;
+#[cfg(any(target_os = "linux", target_os = "android"))]
 use std::os::fd::BorrowedFd;
 use std::rc::Rc;
 
@@ -1338,6 +1340,7 @@ where
         self.backend.stream_info()
     }
 
+    #[cfg(any(target_os = "linux", target_os = "android"))]
     fn poll_fd(&self) -> BorrowedFd {
         self.epoll_fd.0.as_fd()
     }

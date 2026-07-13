@@ -12,6 +12,7 @@ use std::ops::Add;
 use std::ops::Div;
 use std::ops::Mul;
 use std::ops::Sub;
+#[cfg(any(target_os = "linux", target_os = "android"))]
 use std::os::fd::OwnedFd;
 
 use crate::Fourcc;
@@ -101,6 +102,7 @@ impl UserPtrFrame {
     }
 }
 
+#[cfg(any(target_os = "linux", target_os = "android"))]
 #[derive(Debug)]
 pub struct DmabufFrame {
     pub fds: Vec<OwnedFd>,

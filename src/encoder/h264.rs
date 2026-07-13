@@ -23,6 +23,15 @@ pub struct EncoderConfig {
     /// (`colour_description` + `video_full_range_flag`). `None` ⇒ no colour is
     /// signalled.
     pub color: Option<EncoderColorInfo>,
+    /// Whether the predictor synthesizes SPS/PPS NAL units into
+    /// `coded_output`. Default `true` (the historical behaviour — the backend
+    /// owns nothing and the parameter sets appear in-band on IDR / on change).
+    /// A backend whose driver retrieves compliant parameter-set bytes itself
+    /// (e.g. Vulkan Video via `vkGetEncodedVideoSessionParametersKHR`) sets
+    /// this `false` so the predictor never duplicates them: `coded_output` then
+    /// carries only the slice data the backend appends, and the backend prepends
+    /// the driver-authoritative headers at IDR.
+    pub emit_parameter_sets: bool,
 }
 
 impl Default for EncoderConfig {
@@ -35,6 +44,7 @@ impl Default for EncoderConfig {
             pred_structure: PredictionStructure::LowDelay { limit: 2048 },
             initial_tunings: Default::default(),
             color: None,
+            emit_parameter_sets: true,
         }
     }
 }
