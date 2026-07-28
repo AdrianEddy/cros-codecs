@@ -41,6 +41,74 @@ use crate::encoder::Tunings;
 pub(crate) const MIN_BASE_QINDEX: u32 = 0;
 pub(crate) const MAX_BASE_QINDEX: u32 = 255;
 
+/// One AV1 Annex A level row: the constraints a stream must satisfy to conform
+/// to `seq_level_idx` (Table A.1 sizes/rates + the §A.3 tier bitrates as
+/// MainMbps/HighMbps × 1e6; `high_bps == 0` = the level defines no High tier).
+/// The per-level MaxTiles/MaxTileCols constraints are omitted: this predictor
+/// always codes a single tile, which every level allows.
+struct LevelLimits {
+    seq_level_idx: u8,
+    max_pic_size: u32,
+    max_h_size: u32,
+    max_v_size: u32,
+    max_display_rate: u64,
+    main_bps: u64,
+    high_bps: u64,
+}
+
+/// Annex A Table A.1/A.3 — the defined levels 2.0 … 6.3 (`seq_level_idx` 2, 3,
+/// 6, 7 and the 7.x block are reserved).
+#[rustfmt::skip]
+const LEVEL_LIMITS: &[LevelLimits] = &[
+    LevelLimits { seq_level_idx: 0,  max_pic_size: 147_456,    max_h_size: 2048,  max_v_size: 1152, max_display_rate: 4_423_680,     main_bps: 1_500_000,   high_bps: 0 },
+    LevelLimits { seq_level_idx: 1,  max_pic_size: 278_784,    max_h_size: 2816,  max_v_size: 1584, max_display_rate: 8_363_520,     main_bps: 3_000_000,   high_bps: 0 },
+    LevelLimits { seq_level_idx: 4,  max_pic_size: 665_856,    max_h_size: 4352,  max_v_size: 2448, max_display_rate: 19_975_680,    main_bps: 6_000_000,   high_bps: 0 },
+    LevelLimits { seq_level_idx: 5,  max_pic_size: 1_065_024,  max_h_size: 5504,  max_v_size: 3096, max_display_rate: 31_950_720,    main_bps: 10_000_000,  high_bps: 0 },
+    LevelLimits { seq_level_idx: 8,  max_pic_size: 2_359_296,  max_h_size: 6144,  max_v_size: 3456, max_display_rate: 70_778_880,    main_bps: 12_000_000,  high_bps: 30_000_000 },
+    LevelLimits { seq_level_idx: 9,  max_pic_size: 2_359_296,  max_h_size: 6144,  max_v_size: 3456, max_display_rate: 141_557_760,   main_bps: 20_000_000,  high_bps: 50_000_000 },
+    LevelLimits { seq_level_idx: 12, max_pic_size: 8_912_896,  max_h_size: 8192,  max_v_size: 4352, max_display_rate: 267_386_880,   main_bps: 30_000_000,  high_bps: 100_000_000 },
+    LevelLimits { seq_level_idx: 13, max_pic_size: 8_912_896,  max_h_size: 8192,  max_v_size: 4352, max_display_rate: 534_773_760,   main_bps: 40_000_000,  high_bps: 160_000_000 },
+    LevelLimits { seq_level_idx: 14, max_pic_size: 8_912_896,  max_h_size: 8192,  max_v_size: 4352, max_display_rate: 1_069_547_520, main_bps: 60_000_000,  high_bps: 240_000_000 },
+    LevelLimits { seq_level_idx: 15, max_pic_size: 8_912_896,  max_h_size: 8192,  max_v_size: 4352, max_display_rate: 1_069_547_520, main_bps: 60_000_000,  high_bps: 240_000_000 },
+    LevelLimits { seq_level_idx: 16, max_pic_size: 35_651_584, max_h_size: 16384, max_v_size: 8704, max_display_rate: 1_069_547_520, main_bps: 60_000_000,  high_bps: 240_000_000 },
+    LevelLimits { seq_level_idx: 17, max_pic_size: 35_651_584, max_h_size: 16384, max_v_size: 8704, max_display_rate: 2_139_095_040, main_bps: 100_000_000, high_bps: 480_000_000 },
+    LevelLimits { seq_level_idx: 18, max_pic_size: 35_651_584, max_h_size: 16384, max_v_size: 8704, max_display_rate: 4_278_190_080, main_bps: 160_000_000, high_bps: 800_000_000 },
+    LevelLimits { seq_level_idx: 19, max_pic_size: 35_651_584, max_h_size: 16384, max_v_size: 8704, max_display_rate: 4_278_190_080, main_bps: 160_000_000, high_bps: 800_000_000 },
+];
+
+/// `seq_level_idx` 23 = level 7.3 — the "conforms to no defined level"
+/// declaration (with High tier), matching the convention other encoders use
+/// when a stream exceeds every Annex A row.
+const LEVEL_7_3: u8 = 23;
+
+/// Pick the lowest defined level (and its tier) the configured stream conforms
+/// to: `pic_size`/width/height against the Table A.1 maxima, `pic_size × fps`
+/// against MaxDisplayRate, and `target_bps` against the tier bitrate caps (Main
+/// preferred over High; `target_bps == 0` = no bitrate target, e.g. constant
+/// quality, so the bitrate constraint is skipped). Returns
+/// `(seq_level_idx, seq_tier)`; High tier only exists for `seq_level_idx > 7`,
+/// so the result always satisfies the synthesizer's "`seq_tier == 0` unless
+/// `seq_level_idx > 7`" rule.
+pub(crate) fn guess_level(width: u32, height: u32, framerate: u32, target_bps: u64) -> (u8, u8) {
+    let pic_size = u64::from(width) * u64::from(height);
+    for l in LEVEL_LIMITS {
+        if pic_size > u64::from(l.max_pic_size)
+            || width > l.max_h_size
+            || height > l.max_v_size
+            || pic_size * u64::from(framerate) > l.max_display_rate
+        {
+            continue;
+        }
+        if target_bps == 0 || target_bps <= l.main_bps {
+            return (l.seq_level_idx, 0);
+        }
+        if l.high_bps != 0 && target_bps <= l.high_bps {
+            return (l.seq_level_idx, 1);
+        }
+    }
+    (LEVEL_7_3, 1)
+}
+
 pub(crate) struct LowDelayAV1Delegate {
     /// Current sequence header obu
     sequence: SequenceHeaderObu,
@@ -131,9 +199,19 @@ impl<Picture, Reference> LowDelayAV1<Picture, Reference> {
             operating_points: {
                 let mut ops: [OperatingPoint; MAX_NUM_OPERATING_POINTS] = Default::default();
                 ops[0].idc = 0;
-                // Use highest level 23 for now.
-                // TODO(bgrzesik): approximate level base on resolution and framerate
-                ops[0].seq_level_idx = 23;
+                // Declared conformance: the lowest Annex A level the configured
+                // stream fits. CBR/VBR conform at the (peak) target bitrate; a
+                // constant-quality stream has no bitrate target, so only the
+                // size/rate constraints apply.
+                let target_bps = match config.initial_tunings.rate_control {
+                    RateControl::ConstantBitrate(bps) => bps,
+                    RateControl::VariableBitrate { max_bitrate, .. } => max_bitrate,
+                    RateControl::ConstantQuality(_) => 0,
+                };
+                let (seq_level_idx, seq_tier) =
+                    guess_level(width, height, config.initial_tunings.framerate, target_bps);
+                ops[0].seq_level_idx = seq_level_idx;
+                ops[0].seq_tier = seq_tier;
                 ops
             },
 

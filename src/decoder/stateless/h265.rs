@@ -812,23 +812,43 @@ where
             }
         }
 
-        let total_rps_len = self.codec.rps.ref_pic_set_lt_curr[0..self.codec.rps.num_poc_lt_curr]
-            .len()
-            + self.codec.rps.ref_pic_set_lt_foll[0..self.codec.rps.num_poc_lt_foll].len()
-            + self.codec.rps.ref_pic_set_st_curr_after[0..self.codec.rps.num_poc_st_curr_after]
-                .len()
-            + self.codec.rps.ref_pic_set_st_curr_before[0..self.codec.rps.num_poc_st_curr_before]
-                .len()
-            + self.codec.rps.ref_pic_set_st_foll[0..self.codec.rps.num_poc_st_foll].len();
-
-        let dpb_len = self.codec.dpb.entries().len();
-        if dpb_len != total_rps_len {
+        // 8.3.2 NOTE 5: the five RefPicSet lists are disjoint, so no picture may
+        // appear in more than one of them. Check that directly, by looking for a
+        // repeated POC across the lists.
+        //
+        // This deliberately does NOT compare the RPS total against
+        // `dpb.entries().len()`. Those two are not equal in general and were never
+        // meant to be: `entries()` also holds pictures that are only awaiting
+        // output — C.5.2.2 retains every `needed_for_output` picture until it is
+        // bumped, and step 4 just above marks this AU's retired references as
+        // unused while leaving them in place for `remove_unused` (which runs later,
+        // in `update_dpb_before_decoding`). The old comparison therefore fired on
+        // essentially every picture of every stream with any output delay, and its
+        // "in more than one RPS list" message named a condition that would make the
+        // total *larger* than the DPB, not smaller as observed.
+        let rps = &self.codec.rps;
+        let lists: [(&[Option<DpbEntry<B::Handle>>], usize); 5] = [
+            (&rps.ref_pic_set_lt_curr, rps.num_poc_lt_curr),
+            (&rps.ref_pic_set_lt_foll, rps.num_poc_lt_foll),
+            (&rps.ref_pic_set_st_curr_after, rps.num_poc_st_curr_after),
+            (&rps.ref_pic_set_st_curr_before, rps.num_poc_st_curr_before),
+            (&rps.ref_pic_set_st_foll, rps.num_poc_st_foll),
+        ];
+        // Flattened POCs of every resolved entry, in list order. At most
+        // `5 * MAX_DPB_SIZE` items, so the quadratic scan below needs no storage.
+        let pocs = || {
+            lists
+                .iter()
+                .flat_map(|(list, n)| list[..*n].iter().flatten())
+                .map(|e| e.0.borrow().pic_order_cnt_val)
+        };
+        let duplicates = pocs().enumerate().filter(|(i, poc)| pocs().take(*i).any(|p| p == *poc)).count();
+        if duplicates != 0 {
             log::warn!(
-                "The total RPS length {} is not the same as the DPB length {}",
-                total_rps_len,
-                dpb_len
+                "{} reference picture(s) appear in more than one RefPicSet list. \
+                 This is against the specification. See 8.3.2. NOTE 5",
+                duplicates
             );
-            log::warn!("A reference pic may be in more than one RPS list. This is against the specification. See 8.3.2. NOTE 5")
         }
 
         // According to Chromium, unavailable reference pictures are handled by

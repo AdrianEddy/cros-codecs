@@ -26,6 +26,7 @@ use crate::codec::av1::parser::SequenceHeaderObu;
 use crate::codec::av1::parser::TransferCharacteristics;
 use crate::codec::av1::synthesizer::Synthesizer;
 use crate::encoder::av1::EncoderConfig;
+use crate::encoder::stateless::av1::predictor::guess_level;
 use crate::encoder::stateless::av1::predictor::LowDelayAV1;
 use crate::encoder::stateless::predictor::LowDelayDelegate;
 use crate::encoder::stateless::FrameMetadata;
@@ -260,4 +261,60 @@ fn bitrate_controlled_flow_keeps_predictor_state_consistent() {
         let requests = pred.reconstructed(()).unwrap();
         assert!(requests.is_empty());
     }
+}
+
+/// Annex A level selection: the table walk picks the lowest level whose size /
+/// display-rate / bitrate constraints all hold, preferring Main tier.
+#[test]
+fn guess_level_picks_lowest_conforming_row() {
+    // 1080p30 @ 3 Mbps: the picture size needs 4.0 (idx 8), Main tier.
+    assert_eq!(guess_level(1920, 1080, 30, 3_000_000), (8, 0));
+    // 720p30, no bitrate target (constant quality): 3.1 (idx 5).
+    assert_eq!(guess_level(1280, 720, 30, 0), (5, 0));
+    // 4K60 @ 40 Mbps: the display rate needs 5.1 (idx 13); Main caps at exactly 40 Mbps.
+    assert_eq!(guess_level(3840, 2160, 60, 40_000_000), (13, 0));
+    // 4K30 @ 60 Mbps: 5.0 (idx 12), but above Main's 30 Mbps → High tier.
+    assert_eq!(guess_level(3840, 2160, 30, 60_000_000), (12, 1));
+    // 8K120: the display rate needs 6.2 (idx 18).
+    assert_eq!(guess_level(7680, 4320, 120, 0), (18, 0));
+}
+
+/// MaxHSize/MaxVSize bound independently of MaxPicSize: a picture wider than
+/// 5.x's 8192 needs 6.0 even though its area fits a 5.x level.
+#[test]
+fn guess_level_respects_dimension_bounds() {
+    assert_eq!(guess_level(8704, 1024, 30, 0), (16, 0));
+}
+
+/// A stream beyond every defined level declares 7.3 High — the "conforms to no
+/// normal level" fallback.
+#[test]
+fn guess_level_falls_back_to_7_3() {
+    assert_eq!(guess_level(7680, 4320, 240, 0), (23, 1));
+}
+
+/// The sequence header carries the derived level, and a High-tier declaration
+/// survives the synthesizer round-trip (`seq_tier` is only coded when
+/// `seq_level_idx > 7`).
+#[test]
+fn sequence_header_level_derived_and_round_trips() {
+    // `config()` is 1080p constant-quality at the default 30 fps → 4.0 Main.
+    let seq = keyframe_sequence(BitDepth::Depth8, None);
+    assert_eq!(seq.operating_points[0].seq_level_idx, 8);
+    assert_eq!(seq.operating_points[0].seq_tier, 0);
+    let parsed = round_trip(&seq);
+    assert_eq!(parsed.operating_points[0].seq_level_idx, 8);
+    assert_eq!(parsed.operating_points[0].seq_tier, 0);
+
+    // 1080p60 @ 60 Mbps CBR: 5.0 High (above 4.1's 50 Mbps High cap).
+    let mut pred = predictor_with_rc(
+        RateControl::ConstantBitrate(60_000_000),
+        Tunings { framerate: 60, ..Default::default() },
+    );
+    let req = pred.request_keyframe((), frame_meta(0), true).unwrap();
+    assert_eq!(req.sequence.operating_points[0].seq_level_idx, 12);
+    assert_eq!(req.sequence.operating_points[0].seq_tier, 1);
+    let parsed = round_trip(&req.sequence);
+    assert_eq!(parsed.operating_points[0].seq_level_idx, 12);
+    assert_eq!(parsed.operating_points[0].seq_tier, 1);
 }
