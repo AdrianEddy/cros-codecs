@@ -43,9 +43,10 @@ mod predictor;
 #[cfg(feature = "vaapi")]
 pub mod vaapi;
 
-// The tests assert VA-API decisions (packed headers, VA coding types) inline
-// with the predictor checks, so they need the vaapi backend.
-#[cfg(all(test, feature = "vaapi"))]
+// Most of the tests are the GPU-independent predictor / synthesizer round-trips,
+// which must run on every host; the handful that assert VA-API decisions (packed
+// headers, VA coding types) carry their own `vaapi` gate inside the file.
+#[cfg(test)]
 #[path = "h265/tests.rs"]
 mod tests;
 

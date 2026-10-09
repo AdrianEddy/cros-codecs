@@ -22,11 +22,14 @@ use crate::codec::h265::parser::SliceType;
 use crate::codec::h265::parser::Sps;
 use crate::codec::h265::parser::Vps;
 use crate::codec::h265::synthesizer::Synthesizer;
+use crate::encoder::h265::BlockSizes;
 use crate::encoder::h265::EncoderConfig;
 use crate::encoder::stateless::h265::predictor::build_parameter_sets;
 use crate::encoder::stateless::h265::predictor::low_delay_rps;
 use crate::encoder::stateless::h265::predictor::LowDelayH265;
+#[cfg(feature = "vaapi")]
 use crate::encoder::stateless::h265::vaapi::coding_type_for_slice;
+#[cfg(feature = "vaapi")]
 use crate::encoder::stateless::h265::vaapi::decide_packed_headers;
 use crate::encoder::stateless::h265::DpbEntry;
 use crate::encoder::stateless::h265::DpbEntryMeta;
@@ -48,7 +51,14 @@ fn config(width: u32, height: u32, limit: u16) -> EncoderConfig {
         pred_structure: PredictionStructure::LowDelay { limit },
         initial_tunings: Tunings::default(),
         color: None,
+        block_sizes: BlockSizes::CONSERVATIVE,
     }
+}
+
+/// A `config` with backend-declared block sizes, for the capability-derived
+/// geometry round-trips.
+fn config_blocks(width: u32, height: u32, limit: u16, block_sizes: BlockSizes) -> EncoderConfig {
+    EncoderConfig { block_sizes, ..config(width, height, limit) }
 }
 
 /// A `config` with an explicit profile and optional CICP colour, for the
@@ -112,6 +122,7 @@ fn next_nalu(buf: &[u8], expect: NaluType) -> Nalu<'_, NaluHeader> {
 // Packed-header decision: either all three header types are packed or none are.
 // ─────────────────────────────────────────────────────────────────────
 
+#[cfg(feature = "vaapi")]
 #[test]
 fn packed_headers_ihd_all_three() {
     let all = libva::VA_ENC_PACKED_HEADER_SEQUENCE
@@ -122,6 +133,7 @@ fn packed_headers_ihd_all_three() {
     assert_eq!(decide_packed_headers(all | libva::VA_ENC_PACKED_HEADER_MISC), all);
 }
 
+#[cfg(feature = "vaapi")]
 #[test]
 fn packed_headers_mesa_none() {
     // An unsupported attribute means the driver self-generates the headers.
@@ -130,6 +142,7 @@ fn packed_headers_mesa_none() {
     assert_eq!(decide_packed_headers(libva::VA_ENC_PACKED_HEADER_NONE), libva::VA_ENC_PACKED_HEADER_NONE);
 }
 
+#[cfg(feature = "vaapi")]
 #[test]
 fn packed_headers_partial_is_none() {
     // The all-three-or-none rule: SEQUENCE|PICTURE without SLICE → pack nothing.
@@ -211,6 +224,138 @@ fn predictor_sps_conformance_window_for_non_8_multiple() {
     assert_eq!(parsed.conf_win_bottom_offset, 0);
 
     assert_eq!(buf1, synth_sps(&parsed), "conformance-window SPS byte-idempotence");
+}
+
+#[test]
+fn block_sizes_from_caps_picks_16x16_min_cu_from_ctb_32_up() {
+    // (advertised CTB, min TB, max TB) -> (CtbSizeY, MinCbSizeY, min TB, max TB).
+    // 16x16 min CU from CTB 32 up; a 16-sample CTB keeps the 8x8 min CU because
+    // MinCbLog2SizeY may not exceed CtbLog2SizeY.
+    for (caps, want) in [
+        ((32, 4, 32), (32, 16, 4, 32)),
+        ((64, 4, 32), (64, 16, 4, 32)),
+        ((16, 4, 16), (16, 8, 4, 16)),
+        // A CTB smaller than the largest transform clamps the transform down:
+        // MaxTbLog2SizeY <= Min(CtbLog2SizeY, 5).
+        ((16, 4, 32), (16, 8, 4, 16)),
+        // Only large transforms advertised: the min transform follows the max.
+        ((32, 16, 32), (32, 16, 8, 32)),
+    ] {
+        let (ctb, min_tb, max_tb) = caps;
+        let bs = BlockSizes::from_caps(ctb, min_tb, max_tb);
+        assert_eq!(
+            (bs.ctb_size(), bs.min_cb_size(), bs.min_tb_size(), bs.max_tb_size()),
+            want,
+            "from_caps{caps:?}"
+        );
+        // Every geometry the constructor produces satisfies 7.4.3.2.1.
+        assert!(bs.min_tb_size() < bs.min_cb_size(), "MinTbLog2SizeY < MinCbLog2SizeY");
+        assert!(bs.min_cb_size() <= bs.ctb_size(), "MinCbLog2SizeY <= CtbLog2SizeY");
+        assert!(bs.max_tb_log2() <= bs.ctb_log2().min(5), "MaxTbLog2SizeY <= Min(CtbLog2SizeY, 5)");
+        assert!(bs.max_tb_size() >= bs.min_tb_size());
+        // ...and admits at least the two-level residual quad-tree the predictor codes.
+        assert!(bs.max_transform_hierarchy_depth() >= 2, "{caps:?} admits the coded depth");
+    }
+}
+
+#[test]
+fn block_sizes_from_caps_rounds_unadvertised_sizes_down() {
+    // A driver that advertises nothing lands on the smallest legal geometry
+    // rather than an SPS no decoder accepts; non-power-of-two and oversized
+    // values round down into the legal set.
+    assert_eq!(BlockSizes::from_caps(0, 0, 0), BlockSizes::from_caps(16, 4, 4));
+    let bs = BlockSizes::from_caps(0, 0, 0);
+    assert_eq!(
+        (bs.ctb_size(), bs.min_cb_size(), bs.min_tb_size(), bs.max_tb_size()),
+        (16, 8, 4, 4)
+    );
+    let bs = BlockSizes::from_caps(48, 5, 128);
+    assert_eq!(
+        (bs.ctb_size(), bs.min_cb_size(), bs.min_tb_size(), bs.max_tb_size()),
+        (32, 16, 4, 32)
+    );
+    // The documented conservative geometry is what a 32-CTB / 4..=32-TB device
+    // would get, except for the 8x8 min CU it keeps.
+    let c = BlockSizes::CONSERVATIVE;
+    assert_eq!((c.ctb_size(), c.min_cb_size(), c.min_tb_size(), c.max_tb_size()), (32, 8, 4, 32));
+    assert_eq!(BlockSizes::default(), BlockSizes::CONSERVATIVE);
+}
+
+#[test]
+fn predictor_sps_codes_the_backend_block_sizes() {
+    // A backend that advertises CTB 32 with 4..=32 transforms: MinCbSizeY 16, so
+    // 1080 (not a multiple of 16) pads to 1088 and the conformance window crops
+    // the 8 luma rows (4 chroma samples at SubHeightC = 2) back.
+    let cfg = config_blocks(1920, 1080, 60, BlockSizes::from_caps(32, 4, 32));
+    let (_vps, sps, _pps) = build_parameter_sets(&cfg, &Tunings::default(), 60);
+
+    let buf1 = synth_sps(&sps);
+    let nalu = next_nalu(&buf1, NaluType::SpsNut);
+    let mut parser = Parser::default();
+    let parsed = (*parser.parse_sps(&nalu).unwrap()).clone();
+
+    assert_eq!(parsed.log2_min_luma_coding_block_size_minus3, 1, "MinCbSizeY 16");
+    assert_eq!(parsed.log2_diff_max_min_luma_coding_block_size, 1, "CtbSizeY 32");
+    assert_eq!(parsed.min_cb_log2_size_y, 4);
+    assert_eq!(parsed.ctb_size_y, 32);
+    assert_eq!(parsed.log2_min_luma_transform_block_size_minus2, 0, "min TB 4");
+    assert_eq!(parsed.log2_diff_max_min_luma_transform_block_size, 3, "max TB 32");
+    assert_eq!(parsed.max_tb_log2_size_y, 5);
+    assert_eq!(parsed.max_transform_hierarchy_depth_inter, 2);
+    assert_eq!(parsed.max_transform_hierarchy_depth_intra, 2);
+
+    assert_eq!(parsed.pic_width_in_luma_samples, 1920);
+    assert_eq!(parsed.pic_height_in_luma_samples, 1088, "padded up to MinCbSizeY 16");
+    assert!(parsed.conformance_window_flag);
+    assert_eq!(parsed.conf_win_right_offset, 0);
+    assert_eq!(parsed.conf_win_bottom_offset, 4, "(1088 - 1080) / SubHeightC(2)");
+    assert_eq!(parsed.pic_width_in_ctbs_y, 60);
+    assert_eq!(parsed.pic_height_in_ctbs_y, 34, "1088 / 32");
+
+    assert_eq!(buf1, synth_sps(&parsed), "capability-derived SPS byte-idempotence");
+}
+
+#[test]
+fn predictor_sps_ctb_64_round_trips() {
+    let cfg = config_blocks(1920, 1080, 60, BlockSizes::from_caps(64, 4, 32));
+    let (_vps, sps, _pps) = build_parameter_sets(&cfg, &Tunings::default(), 60);
+
+    let buf1 = synth_sps(&sps);
+    let nalu = next_nalu(&buf1, NaluType::SpsNut);
+    let mut parser = Parser::default();
+    let parsed = (*parser.parse_sps(&nalu).unwrap()).clone();
+
+    assert_eq!(parsed.log2_min_luma_coding_block_size_minus3, 1, "MinCbSizeY 16");
+    assert_eq!(parsed.log2_diff_max_min_luma_coding_block_size, 2, "CtbSizeY 64");
+    assert_eq!(parsed.ctb_size_y, 64);
+    // The coded dimensions still pad to MinCbSizeY (16), not to the CTB.
+    assert_eq!(parsed.pic_height_in_luma_samples, 1088);
+    assert_eq!(parsed.pic_width_in_ctbs_y, 30, "1920 / 64");
+    assert_eq!(parsed.pic_height_in_ctbs_y, 17, "1088 / 64, rounded up");
+
+    assert_eq!(buf1, synth_sps(&parsed), "CTB-64 SPS byte-idempotence");
+}
+
+#[test]
+fn predictor_sps_ctb_16_keeps_the_8x8_min_cu() {
+    // A 16-sample CTB cannot carry a 16-sample min CU, so the geometry stays at
+    // 8x8 — and 1080p then pads to the 8-sample grid it always did.
+    let cfg = config_blocks(1920, 1080, 60, BlockSizes::from_caps(16, 4, 32));
+    let (_vps, sps, _pps) = build_parameter_sets(&cfg, &Tunings::default(), 60);
+
+    let buf1 = synth_sps(&sps);
+    let nalu = next_nalu(&buf1, NaluType::SpsNut);
+    let mut parser = Parser::default();
+    let parsed = (*parser.parse_sps(&nalu).unwrap()).clone();
+
+    assert_eq!(parsed.log2_min_luma_coding_block_size_minus3, 0, "MinCbSizeY 8");
+    assert_eq!(parsed.log2_diff_max_min_luma_coding_block_size, 1, "CtbSizeY 16");
+    assert_eq!(parsed.log2_diff_max_min_luma_transform_block_size, 2, "max TB clamped to the CTB");
+    assert_eq!(parsed.max_tb_log2_size_y, 4);
+    assert_eq!(parsed.pic_height_in_luma_samples, 1080);
+    assert!(!parsed.conformance_window_flag);
+
+    assert_eq!(buf1, synth_sps(&parsed), "CTB-16 SPS byte-idempotence");
 }
 
 #[test]
@@ -416,6 +561,7 @@ fn predictor_p_slice_header_round_trips_trivial_rps() {
 // mutually consistent NAL type / slice type / coding_type / is_idr / ref list.
 // ─────────────────────────────────────────────────────────────────────
 
+#[cfg(feature = "vaapi")]
 #[test]
 fn forced_mid_gop_keyframe_is_a_consistent_true_idr() {
     const LIMIT: u16 = 30;

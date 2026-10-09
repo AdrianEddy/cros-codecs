@@ -8,10 +8,13 @@
 //! HEVC-specific decisions (Main, 8-bit 4:2:0, single slice / tile / sub-layer):
 //! - **Profile-tier-level**: `general_profile_idc == 1` (Main), compat[1] set,
 //!   progressive + frame-only, the config's level.
-//! - **Coding-block sizes**: min CB `8` (`log2_min_luma_coding_block_size_minus3
-//!   == 0`), CTB `32` (`log2_diff_max_min_luma_coding_block_size == 2`) — the
-//!   a broadly supported default. Min TB `4`, max
-//!   TB `32`, transform-hierarchy depth `2`.
+//! - **Coding-block sizes**: whatever the backend's
+//!   [`BlockSizes`](crate::encoder::h265::BlockSizes) says its hardware supports —
+//!   the CTB, the min CU the coded dimensions are padded to, and the transform
+//!   block range all come from `config.block_sizes`, and only the
+//!   transform-hierarchy depth ([`TRANSFORM_HIERARCHY_DEPTH`]) is the predictor's
+//!   own choice. Backends without a block-size query pass
+//!   [`BlockSizes::CONSERVATIVE`](crate::encoder::h265::BlockSizes::CONSERVATIVE).
 //! - **`dec_pic_buf_mgr`**: `sps_max_dec_pic_buffering_minus1 == 1` (current + one
 //!   reference), `max_num_reorder_pics == 0` (LowDelay, no reordering).
 //! - **RPS**: the trivial LowDelay short-term RPS is carried *in the slice header*
@@ -56,16 +59,12 @@ use crate::encoder::Tunings;
 pub(crate) const MIN_QP: u8 = 1;
 pub(crate) const MAX_QP: u8 = 51;
 
-/// Min luma coding-block size log2 minus 3 → MinCbSizeY = 8.
-const LOG2_MIN_CB_SIZE_MINUS3: u8 = 0;
-/// Max minus min luma coding-block size log2 → CtbSizeY = 32 (log2 = 3 + 2).
-const LOG2_DIFF_MAX_MIN_CB_SIZE: u8 = 2;
-const MIN_CB_LOG2: u32 = 3 + LOG2_MIN_CB_SIZE_MINUS3 as u32;
-const CTB_LOG2: u32 = MIN_CB_LOG2 + LOG2_DIFF_MAX_MIN_CB_SIZE as u32;
-/// CtbSizeY = 32.
-const CTB_SIZE: u32 = 1 << CTB_LOG2;
-/// MinCbSizeY = 8 — `pic_{width,height}_in_luma_samples` must be a multiple of it.
-const MIN_CB_SIZE: u32 = 1 << MIN_CB_LOG2;
+/// `max_transform_hierarchy_depth_{inter,intra}`: two levels of residual quad-tree
+/// split below the CU — the one block-size decision that is the predictor's rather
+/// than the backend's. It is emitted clamped to `CtbLog2SizeY - MinTbLog2SizeY`
+/// (`BlockSizes::max_transform_hierarchy_depth`), which every geometry `from_caps`
+/// can build already admits, so the clamp bites only if this value is ever raised.
+const TRANSFORM_HIERARCHY_DEPTH: u8 = 2;
 
 /// `(SubWidthC, SubHeightC)` for a `chroma_format_idc`:
 /// 4:2:0 → (2, 2); 4:2:2 → (2, 1). Monochrome/4:4:4 are never emitted.
@@ -152,11 +151,13 @@ pub(crate) fn build_parameter_sets(
 ) -> (Rc<Vps>, Rc<Sps>, Rc<Pps>) {
     let width = config.resolution.width;
     let height = config.resolution.height;
+    let blocks = config.block_sizes;
     // HEVC requires the coded dimensions to be a multiple of MinCbSizeY; pad up
     // and crop the difference back to the display size with a conformance window
-    // (the H.264 `pic_*_in_mbs` + `frame_cropping` pattern, at 8-px granularity).
-    let coded_w = align_up(width, MIN_CB_SIZE);
-    let coded_h = align_up(height, MIN_CB_SIZE);
+    // (the H.264 `pic_*_in_mbs` + `frame_cropping` pattern, at MinCbSizeY
+    // granularity).
+    let coded_w = align_up(width, blocks.min_cb_size());
+    let coded_h = align_up(height, blocks.min_cb_size());
 
     let level = config.level;
     let ptl = build_ptl(config.profile, level);
@@ -176,10 +177,13 @@ pub(crate) fn build_parameter_sets(
 
     let log2_max_poc_lsb_minus4 = log2_max_poc_lsb_minus4(limit);
 
-    let pic_w_ctbs = coded_w.div_ceil(CTB_SIZE);
-    let pic_h_ctbs = coded_h.div_ceil(CTB_SIZE);
+    let pic_w_ctbs = coded_w.div_ceil(blocks.ctb_size());
+    let pic_h_ctbs = coded_h.div_ceil(blocks.ctb_size());
 
     let conformance_window_flag = coded_w != width || coded_h != height;
+
+    let transform_hierarchy_depth =
+        TRANSFORM_HIERARCHY_DEPTH.min(blocks.max_transform_hierarchy_depth());
 
     // An optional CICP colour description is carried in the VUI. Without one,
     // the VUI is omitted entirely.
@@ -221,12 +225,12 @@ pub(crate) fn build_parameter_sets(
         max_dec_pic_buffering_minus1,
         max_num_reorder_pics,
         max_latency_increase_plus1,
-        log2_min_luma_coding_block_size_minus3: LOG2_MIN_CB_SIZE_MINUS3,
-        log2_diff_max_min_luma_coding_block_size: LOG2_DIFF_MAX_MIN_CB_SIZE,
-        log2_min_luma_transform_block_size_minus2: 0,
-        log2_diff_max_min_luma_transform_block_size: 3,
-        max_transform_hierarchy_depth_inter: 2,
-        max_transform_hierarchy_depth_intra: 2,
+        log2_min_luma_coding_block_size_minus3: blocks.log2_min_cb_minus3(),
+        log2_diff_max_min_luma_coding_block_size: blocks.log2_diff_max_min_cb(),
+        log2_min_luma_transform_block_size_minus2: blocks.log2_min_tb_minus2(),
+        log2_diff_max_min_luma_transform_block_size: blocks.log2_diff_max_min_tb(),
+        max_transform_hierarchy_depth_inter: transform_hierarchy_depth,
+        max_transform_hierarchy_depth_intra: transform_hierarchy_depth,
         scaling_list_enabled_flag: false,
         scaling_list_data_present_flag: false,
         amp_enabled_flag: true,
@@ -243,14 +247,14 @@ pub(crate) fn build_parameter_sets(
         extension_present_flag: false,
         // Computed fields the synthesizer / backend read.
         chroma_array_type: chroma_format_idc,
-        min_cb_log2_size_y: MIN_CB_LOG2,
-        ctb_log2_size_y: CTB_LOG2,
-        ctb_size_y: CTB_SIZE,
+        min_cb_log2_size_y: blocks.min_cb_log2(),
+        ctb_log2_size_y: blocks.ctb_log2(),
+        ctb_size_y: blocks.ctb_size(),
         pic_width_in_ctbs_y: pic_w_ctbs,
         pic_height_in_ctbs_y: pic_h_ctbs,
         pic_size_in_ctbs_y: pic_w_ctbs * pic_h_ctbs,
         pic_size_in_samples_y: coded_w * coded_h,
-        max_tb_log2_size_y: 5,
+        max_tb_log2_size_y: blocks.max_tb_log2(),
         vps: None,
         ..Default::default()
     };
