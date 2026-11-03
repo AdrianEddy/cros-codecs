@@ -224,6 +224,8 @@ where
                 0,
                 0,
                 0,
+                // No segmentation map
+                0,
             ),
         ));
 
