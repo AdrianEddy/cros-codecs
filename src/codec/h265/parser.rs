@@ -1708,7 +1708,12 @@ pub struct SliceHeader {
     /// num_entry_point_offsets + 1 subsets, with subset index values ranging
     /// from 0 to num_entry_point_offsets, inclusive. See the specification for
     /// more details.
-    pub entry_point_offset_minus1: [u32; 32],
+    ///
+    /// Holds exactly `num_entry_point_offsets` values. Their number is bounded
+    /// only by the picture's geometry (one per CTB row with wavefront parallel
+    /// processing, one per tile with tiles, the two multiplied together), so a
+    /// 2160p WPP stream with 64-sample CTBs already carries 33 of them.
+    pub entry_point_offset_minus1: Vec<u32>,
     /// Same as NumPicTotalCurr in the specification.
     pub num_pic_total_curr: u32,
     // Size of slice_header() in bits.
@@ -1803,8 +1808,13 @@ impl<'a> Slice<'a> {
             let dependent_slice_segment_flag = self.header.dependent_slice_segment_flag;
             let segment_address = self.header.segment_address;
 
+            // The entry points are coded in every slice segment header,
+            // dependent ones included, so they stay this segment's own: the
+            // count together with its offsets.
+            let num_entry_point_offsets = self.header.num_entry_point_offsets;
             let offset_len_minus1 = self.header.offset_len_minus1;
-            let entry_point_offset_minus1 = self.header.entry_point_offset_minus1;
+            let entry_point_offset_minus1 =
+                std::mem::take(&mut self.header.entry_point_offset_minus1);
             let num_pic_total_curr = self.header.num_pic_total_curr;
             let header_bit_size = self.header.header_bit_size;
             let n_emulation_prevention_bytes = self.header.n_emulation_prevention_bytes;
@@ -1818,6 +1828,7 @@ impl<'a> Slice<'a> {
             self.header.pic_parameter_set_id = pic_parameter_set_id;
             self.header.dependent_slice_segment_flag = dependent_slice_segment_flag;
             self.header.segment_address = segment_address;
+            self.header.num_entry_point_offsets = num_entry_point_offsets;
             self.header.offset_len_minus1 = offset_len_minus1;
             self.header.entry_point_offset_minus1 = entry_point_offset_minus1;
             self.header.num_pic_total_curr = num_pic_total_curr;
@@ -4083,7 +4094,10 @@ impl Parser {
             let max = if !pps.tiles_enabled_flag && pps.entropy_coding_sync_enabled_flag {
                 sps.pic_height_in_ctbs_y - 1
             } else if pps.tiles_enabled_flag && !pps.entropy_coding_sync_enabled_flag {
-                u32::from((pps.num_tile_columns_minus1 + 1) * (pps.num_tile_rows_minus1 + 1) - 1)
+                // In `u32`: 16 x 16 tiles already overflow the `u8` fields' type.
+                (u32::from(pps.num_tile_columns_minus1) + 1)
+                    * (u32::from(pps.num_tile_rows_minus1) + 1)
+                    - 1
             } else {
                 (u32::from(pps.num_tile_columns_minus1) + 1) * sps.pic_height_in_ctbs_y - 1
             };
@@ -4091,10 +4105,27 @@ impl Parser {
             hdr.num_entry_point_offsets = r.read_ue_max(max)?;
             if hdr.num_entry_point_offsets > 0 {
                 hdr.offset_len_minus1 = r.read_ue_max(31)?;
-                for i in 0..hdr.num_entry_point_offsets as usize {
-                    let num_bits = usize::from(hdr.offset_len_minus1 + 1);
-                    hdr.entry_point_offset_minus1[i] = r.read_bits(num_bits)?;
+                let num_bits = usize::from(hdr.offset_len_minus1) + 1;
+                let count = hdr.num_entry_point_offsets as usize;
+                // Every offset is `num_bits` wide, so a count the NAL cannot
+                // hold is refused before the table is sized from it.
+                if count * num_bits > r.num_bits_left() {
+                    return Err(format!(
+                        "{count} entry point offsets of {num_bits} bits overrun the slice segment header"
+                    ));
                 }
+                let mut offsets = Vec::with_capacity(count);
+                for _ in 0..count {
+                    // `read_bits` stops at 31 bits, and `offset_len_minus1`
+                    // may be 31: a 32-bit offset is read as two halves.
+                    let offset = if num_bits == 32 {
+                        (r.read_bits::<u32>(16)? << 16) | r.read_bits::<u32>(16)?
+                    } else {
+                        r.read_bits(num_bits)?
+                    };
+                    offsets.push(offset);
+                }
+                hdr.entry_point_offset_minus1 = offsets;
             }
         }
 
@@ -4161,6 +4192,8 @@ mod tests {
     const STREAM_TEST_25_FPS_SLICE_1: &[u8] =
         include_bytes!("test_data/test-25fps-h265-slice-data-1.bin");
 
+    const STREAM_WPP_64X1088: &[u8] = include_bytes!("test_data/wpp-64x1088-ctb16.h265");
+
     fn dispatch_parse_call(parser: &mut Parser, nalu: Nalu<NaluHeader>) -> Result<(), String> {
         match nalu.header.type_ {
             NaluType::TrailN
@@ -4212,6 +4245,31 @@ mod tests {
         }
 
         None
+    }
+
+    /// A wavefront-parallel slice codes one entry point per CTB row after its
+    /// first, so a tall picture of small CTBs carries more of them than the
+    /// 32 a fixed table once held (a 2160p stream with 64-sample CTBs has 33).
+    #[test]
+    fn slice_header_keeps_every_wavefront_entry_point() {
+        let mut parser = Parser::default();
+        for nalu_type in [NaluType::VpsNut, NaluType::SpsNut, NaluType::PpsNut] {
+            let nalu = find_nalu_by_type(STREAM_WPP_64X1088, nalu_type, 0).unwrap();
+            dispatch_parse_call(&mut parser, nalu).unwrap();
+        }
+        let pps = parser.get_pps(0).unwrap();
+        assert!(pps.entropy_coding_sync_enabled_flag);
+        assert_eq!(pps.sps.pic_height_in_ctbs_y, 68);
+
+        let nalu = find_nalu_by_type(STREAM_WPP_64X1088, NaluType::IdrNLp, 0).unwrap();
+        let hdr = parser.parse_slice_header(nalu).unwrap().header;
+
+        // Read back with FFmpeg's `trace_headers` bitstream filter.
+        assert_eq!(hdr.num_entry_point_offsets, 67);
+        assert_eq!(hdr.offset_len_minus1, 7);
+        assert_eq!(hdr.entry_point_offset_minus1.len(), 67);
+        assert_eq!(hdr.entry_point_offset_minus1[..3], [53, 6, 4]);
+        assert_eq!(hdr.entry_point_offset_minus1[64..], [2, 2, 1]);
     }
 
     /// This test is adapted from chromium, available at media/video/h265_parser_unittest.cc

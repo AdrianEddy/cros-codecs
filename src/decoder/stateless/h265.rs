@@ -1321,6 +1321,14 @@ where
     fn flush(&mut self) -> Result<(), DecodeError> {
         self.drain()?;
         self.decoding_state = DecodingState::Reset;
+        // A flush ends the coded video sequence as an end of sequence NAL unit
+        // does: whatever is decoded next starts from random access (a seek),
+        // so an IRAP picture there has NoRaslOutputFlag equal to 1. Its POC
+        // then owes nothing to the pictures before the flush, and a CRA's RASL
+        // pictures, which reference pictures this decoder never saw, are
+        // dropped instead of decoded against missing references. FFmpeg's
+        // `hevc_decode_flush` sets its `eos` for the same reason.
+        self.codec.first_picture_after_eos = true;
 
         Ok(())
     }

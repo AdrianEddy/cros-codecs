@@ -1180,14 +1180,17 @@ impl<'n, W: Write> Synthesizer<'n, SliceHeader, W> {
         }
 
         if pps.tiles_enabled_flag || pps.entropy_coding_sync_enabled_flag {
+            // A count its table disagrees with would code a header whose
+            // offsets do not match it.
+            if hdr.entry_point_offset_minus1.len() != hdr.num_entry_point_offsets as usize {
+                return Err(SynthesizerError::Unsupported);
+            }
             self.ue(hdr.num_entry_point_offsets)?;
             if hdr.num_entry_point_offsets > 0 {
                 self.ue(hdr.offset_len_minus1)?;
-                for i in 0..hdr.num_entry_point_offsets as usize {
-                    self.u(
-                        usize::from(hdr.offset_len_minus1 + 1),
-                        hdr.entry_point_offset_minus1[i],
-                    )?;
+                let num_bits = usize::from(hdr.offset_len_minus1) + 1;
+                for &offset in &hdr.entry_point_offset_minus1 {
+                    self.u(num_bits, offset)?;
                 }
             }
         }
@@ -1207,6 +1210,7 @@ mod tests {
     use std::rc::Rc;
 
     use super::Synthesizer;
+    use super::SynthesizerError;
     use crate::codec::h264::nalu::Nalu;
     use crate::codec::h265::parser::HrdParams;
     use crate::codec::h265::parser::Level;
@@ -1975,5 +1979,89 @@ mod tests {
         let nalu2 = Nalu::<NaluHeader>::next(&mut cursor).unwrap();
         let parsed2 = parser.parse_slice_header(nalu2).unwrap().header;
         assert_eq!(parsed1, parsed2, "separate-colour-plane B slice struct equality");
+    }
+
+    /// One entry point per tile after the first: 16 x 16 tiles allow 255 of
+    /// them, a count whose bound overflows the `u8` tile fields' own type, and
+    /// `offset_len_minus1` 31 makes each offset 32 bits wide, one past what a
+    /// single `read_bits` call takes.
+    #[test]
+    fn synthesize_slice_header_with_255_full_width_entry_points() {
+        let mut sps = make_sps(1, 0);
+        // 64-sample CTBs: 16 x 16 of them.
+        sps.pic_width_in_luma_samples = 1024;
+        sps.pic_height_in_luma_samples = 1024;
+
+        let mut pps = make_pps(Rc::new(sps.clone()));
+        pps.tiles_enabled_flag = true;
+        pps.num_tile_columns_minus1 = 15;
+        pps.num_tile_rows_minus1 = 15;
+        pps.uniform_spacing_flag = true;
+
+        let (mut parser, sps, pps) = register(&sps, &pps);
+        assert_eq!((sps.pic_width_in_ctbs_y, sps.pic_height_in_ctbs_y), (16, 16));
+
+        let offsets: Vec<u32> =
+            (0..255u32).map(|i| i.wrapping_mul(0x0101_0101) | (i & 1) << 31).collect();
+        assert!(offsets.contains(&0xFEFE_FEFE));
+        let hdr = SliceHeader {
+            first_slice_segment_in_pic_flag: true,
+            pic_parameter_set_id: 0,
+            type_: SliceType::I,
+            sao_luma_flag: true,
+            sao_chroma_flag: true,
+            qp_delta: 4,
+            loop_filter_across_slices_enabled_flag: true,
+            num_entry_point_offsets: 255,
+            offset_len_minus1: 31,
+            entry_point_offset_minus1: offsets.clone(),
+            ..Default::default()
+        };
+
+        let mut buf1 = Vec::new();
+        Synthesizer::<'_, SliceHeader, _>::synthesize(
+            NaluType::IdrWRadl,
+            &hdr,
+            &sps,
+            &pps,
+            &mut buf1,
+            true,
+        )
+        .unwrap();
+
+        let mut cursor = Cursor::new(&buf1[..]);
+        let nalu = Nalu::<NaluHeader>::next(&mut cursor).unwrap();
+        let parsed1 = parser.parse_slice_header(nalu).unwrap().header;
+        assert_eq!(parsed1.num_entry_point_offsets, 255);
+        assert_eq!(parsed1.offset_len_minus1, 31);
+        assert_eq!(parsed1.entry_point_offset_minus1, offsets);
+
+        let mut buf2 = Vec::new();
+        Synthesizer::<'_, SliceHeader, _>::synthesize(
+            NaluType::IdrWRadl,
+            &parsed1,
+            &sps,
+            &pps,
+            &mut buf2,
+            true,
+        )
+        .unwrap();
+        assert_eq!(buf1, buf2, "tiled slice byte-idempotence");
+
+        // A count its table disagrees with is refused, not coded.
+        let mut short = parsed1.clone();
+        short.entry_point_offset_minus1.pop();
+        let mut buf3 = Vec::new();
+        assert!(matches!(
+            Synthesizer::<'_, SliceHeader, _>::synthesize(
+                NaluType::IdrWRadl,
+                &short,
+                &sps,
+                &pps,
+                &mut buf3,
+                true
+            ),
+            Err(SynthesizerError::Unsupported)
+        ));
     }
 }
