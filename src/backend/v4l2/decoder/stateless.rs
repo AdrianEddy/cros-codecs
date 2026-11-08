@@ -8,6 +8,7 @@ use std::sync::Arc;
 
 use crate::backend::v4l2::decoder::V4l2StreamInfo;
 use crate::decoder::stateless::NewStatelessDecoderError;
+use crate::decoder::stateless::StatelessBackendError;
 use crate::decoder::stateless::StatelessBackendResult;
 use crate::decoder::stateless::StatelessDecoderBackend;
 use crate::decoder::DecodedHandle;
@@ -136,7 +137,9 @@ impl<V: VideoFrame> V4l2StatelessDecoderBackend<V> {
         self.stream_info.coded_resolution = coded_resolution;
         self.stream_info.min_num_frames = min_num_frames;
 
-        Ok(self.device.initialize_queues(fourcc, coded_resolution, min_num_frames as u32)?)
+        self.device
+            .initialize_queues(fourcc, coded_resolution, min_num_frames as u32)
+            .map_err(StatelessBackendError::SequenceNegotiation)
     }
 }
 

@@ -68,6 +68,15 @@ pub type NewPictureResult<T> = Result<T, NewPictureError>;
 /// Error returned by stateless backend methods.
 #[derive(Error, Debug)]
 pub enum StatelessBackendError {
+    /// The backend could not set itself up for a new sequence: the stream's profile
+    /// or format is one it cannot decode, or the device refused what the sequence
+    /// needs (the VA backend's config or decode context, the V4L2 backend's queues).
+    /// Both return it for every `new_sequence` / `change_stream_info` failure. Unlike a
+    /// fault on one picture, no later picture can decode until a sequence is set up,
+    /// so a caller must not skip it and carry on. The error it holds names the cause
+    /// and keeps the device's own error (the VA backend's `VaError`) in its chain.
+    #[error(transparent)]
+    SequenceNegotiation(anyhow::Error),
     #[error(transparent)]
     Other(#[from] anyhow::Error),
 }

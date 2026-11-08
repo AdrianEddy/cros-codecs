@@ -14,6 +14,7 @@ use libva::{
     SurfaceMemoryDescriptor, VaError,
 };
 
+use crate::decoder::stateless::StatelessBackendError;
 use crate::decoder::stateless::StatelessBackendResult;
 use crate::decoder::stateless::StatelessCodec;
 use crate::decoder::stateless::StatelessDecoderBackend;
@@ -231,10 +232,20 @@ impl<V: VideoFrame> VaapiDecodedHandle<V> {
     }
 }
 
+/// What [`VaapiBackend::new_sequence`] negotiated for the current coded sequence: its
+/// stream info and the decode context created for it at its coded size.
+pub(crate) struct NegotiatedSequence {
+    pub(crate) stream_info: StreamInfo,
+    pub(crate) context: Rc<Context>,
+}
+
 pub struct VaapiBackend<V: VideoFrame> {
     pub display: Rc<Display>,
-    pub context: Rc<Context>,
-    stream_info: StreamInfo,
+    /// `None` until the first sequence header is negotiated. No VA config or context
+    /// exists before then: a context is created at the coded size the stream states,
+    /// as FFmpeg, GStreamer and Chromium do, never at a placeholder size the driver
+    /// may refuse (Mesa's radeonsi decodes nothing below 64x64).
+    sequence: Option<NegotiatedSequence>,
     // TODO: We should try to support context reuse
     _supports_context_reuse: bool,
     _phantom_data: PhantomData<V>,
@@ -271,44 +282,35 @@ fn output_decoded_format(rt_format: u32) -> anyhow::Result<DecodedFormat> {
 }
 
 impl<V: VideoFrame> VaapiBackend<V> {
-    // The initial config/context creation returns a
-    // `Result` instead of `.expect()`-panicking, so a driver that cannot create
-    // the bootstrap H.264-Main VLD config/context surfaces a `VaError` the caller
-    // classifies, rather than aborting the process.
-    pub(crate) fn new(
-        display: Rc<libva::Display>,
-        supports_context_reuse: bool,
-    ) -> Result<Self, VaError> {
-        let init_stream_info = StreamInfo {
-            format: DecodedFormat::NV12,
-            coded_resolution: Resolution::from((16, 16)),
-            display_resolution: Resolution::from((16, 16)),
-            min_num_frames: 1,
-        };
-        let config = display.create_config(
-            vec![libva::VAConfigAttrib {
-                type_: libva::VAConfigAttribType::VAConfigAttribRTFormat,
-                value: libva::VA_RT_FORMAT_YUV420,
-            }],
-            libva::VAProfile::VAProfileH264Main,
-            libva::VAEntrypoint::VAEntrypointVLD,
-        )?;
-        let context = display.create_context::<<V as VideoFrame>::MemDescriptor>(
-            &config,
-            init_stream_info.coded_resolution.width,
-            init_stream_info.coded_resolution.height,
-            None,
-            true,
-        )?;
-        Ok(Self {
-            display: display,
-            context: context,
+    /// A backend on `display` that has created nothing yet: its VA config and context
+    /// are created by [`Self::new_sequence`], once a sequence header states the profile,
+    /// RT format and coded size they must have.
+    pub(crate) fn new(display: Rc<libva::Display>, supports_context_reuse: bool) -> Self {
+        Self {
+            display,
+            sequence: None,
             _supports_context_reuse: supports_context_reuse,
-            stream_info: init_stream_info,
             _phantom_data: Default::default(),
-        })
+        }
     }
 
+    /// The decode context of the current sequence.
+    pub(crate) fn context(&self) -> anyhow::Result<&Rc<Context>> {
+        Ok(&self.negotiated()?.context)
+    }
+
+    /// The current sequence: its stream info and its decode context.
+    pub(crate) fn negotiated(&self) -> anyhow::Result<&NegotiatedSequence> {
+        self.sequence
+            .as_ref()
+            .ok_or_else(|| anyhow!("no VA decode context: no sequence header has been negotiated"))
+    }
+
+    /// Creates the VA config and decode context `stream_params` needs, at its coded
+    /// size. Every failure is a [`StatelessBackendError::SequenceNegotiation`]; a
+    /// refusal by the driver keeps the [`VaError`] in its chain, so the caller can
+    /// read and report the VA status. On failure the previous sequence, if any, is
+    /// kept.
     pub(crate) fn new_sequence<StreamData>(
         &mut self,
         stream_params: &StreamData,
@@ -316,20 +318,38 @@ impl<V: VideoFrame> VaapiBackend<V> {
     where
         for<'a> &'a StreamData: VaStreamInfo,
     {
-        self.stream_info.display_resolution = Resolution::from(stream_params.visible_rect());
-        self.stream_info.coded_resolution = stream_params.coded_size().clone();
-        self.stream_info.min_num_frames = stream_params.min_num_surfaces();
+        let sequence =
+            self.negotiate(stream_params).map_err(StatelessBackendError::SequenceNegotiation)?;
+        self.sequence = Some(sequence);
+        Ok(())
+    }
 
+    /// The sequence `stream_params` states, with its VA config and decode context.
+    fn negotiate<StreamData>(
+        &self,
+        stream_params: &StreamData,
+    ) -> anyhow::Result<NegotiatedSequence>
+    where
+        for<'a> &'a StreamData: VaStreamInfo,
+    {
         // Derive the RT format and the output `DecodedFormat` from the
         // stream's bit depth and chroma subsampling instead of hardcoding 8-bit
         // 4:2:0. Only the three formats with zero-copy DMA output wiring are
         // accepted (see `output_decoded_format`); any other (12-bit, 4:4:4, …)
         // is an explicit error rather than a silent mis-decode into a
         // wrong-layout surface.
-        let rt_format = stream_params
-            .rt_format()
-            .map_err(|_| anyhow!("Could not get RT format from stream!"))?;
-        self.stream_info.format = output_decoded_format(rt_format)?;
+        let rt_format =
+            stream_params.rt_format().context("deriving the VA RT format of the sequence")?;
+        let format = output_decoded_format(rt_format)?;
+        let profile =
+            stream_params.va_profile().context("deriving the VA profile of the sequence")?;
+        let stream_info = StreamInfo {
+            format,
+            coded_resolution: stream_params.coded_size(),
+            display_resolution: Resolution::from(stream_params.visible_rect()),
+            min_num_frames: stream_params.min_num_surfaces(),
+        };
+        let Resolution { width, height } = stream_info.coded_resolution;
 
         // TODO: Handle context re-use
         let config = self
@@ -339,23 +359,21 @@ impl<V: VideoFrame> VaapiBackend<V> {
                     type_: libva::VAConfigAttribType::VAConfigAttribRTFormat,
                     value: rt_format,
                 }],
-                stream_params.va_profile().map_err(|_| anyhow!("Could not get VAProfile!"))?,
+                profile,
                 libva::VAEntrypoint::VAEntrypointVLD,
             )
-            .map_err(|_| anyhow!("Could not create VAConfig!"))?;
+            .with_context(|| {
+                format!(
+                    "creating the VA decode config (VAProfile {profile}, RT format {rt_format:#x})"
+                )
+            })?;
         let context = self
             .display
-            .create_context::<<V as VideoFrame>::MemDescriptor>(
-                &config,
-                self.stream_info.coded_resolution.width,
-                self.stream_info.coded_resolution.height,
-                None,
-                true,
-            )
-            .map_err(|_| anyhow!("Could not create VAContext!"))?;
-        self.context = context;
-
-        Ok(())
+            .create_context::<<V as VideoFrame>::MemDescriptor>(&config, width, height, None, true)
+            .with_context(|| {
+                format!("creating the {width}x{height} VA decode context (VAProfile {profile})")
+            })?;
+        Ok(NegotiatedSequence { stream_info, context })
     }
 
     pub(crate) fn process_picture<Codec: StatelessCodec>(
@@ -366,10 +384,8 @@ impl<V: VideoFrame> VaapiBackend<V> {
         Self: StatelessDecoderBackendPicture<Codec>,
         for<'a> &'a Codec::FormatInfo: VaStreamInfo,
     {
-        Ok(Rc::new(RefCell::new(VaapiDecodedHandle::new(
-            picture,
-            self.stream_info.display_resolution.clone(),
-        )?)))
+        let display_resolution = self.negotiated()?.stream_info.display_resolution;
+        Ok(Rc::new(RefCell::new(VaapiDecodedHandle::new(picture, display_resolution)?)))
     }
 }
 
@@ -442,7 +458,7 @@ impl<V: VideoFrame> StatelessDecoderBackend for VaapiBackend<V> {
     type Handle = DecodedHandle<V>;
 
     fn stream_info(&self) -> Option<&StreamInfo> {
-        Some(&self.stream_info)
+        self.sequence.as_ref().map(|sequence| &sequence.stream_info)
     }
 
     fn reset_backend(&mut self) -> anyhow::Result<()> {

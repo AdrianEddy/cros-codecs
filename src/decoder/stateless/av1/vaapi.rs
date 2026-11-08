@@ -517,12 +517,12 @@ impl<V: VideoFrame> StatelessAV1DecoderBackend for VaapiBackend<V> {
             let display = alloc_cb().ok_or(NewPictureError::OutOfOutputBuffers)?;
             Ok(VaapiPicture::new_with_display(
                 timestamp,
-                Rc::clone(&self.context),
+                Rc::clone(self.context()?),
                 reconstruct,
                 display,
             )?)
         } else {
-            Ok(VaapiPicture::new(timestamp, Rc::clone(&self.context), reconstruct)?)
+            Ok(VaapiPicture::new(timestamp, Rc::clone(self.context()?), reconstruct)?)
         }
     }
 
@@ -545,7 +545,7 @@ impl<V: VideoFrame> StatelessAV1DecoderBackend for VaapiBackend<V> {
         )
         .context("Failed to build picture parameter")?;
         let pic_param = self
-            .context
+            .context()?
             .create_buffer(pic_param)
             .context("Failed to create picture parameter buffer")?;
         picture.add_buffer(pic_param);
@@ -561,7 +561,7 @@ impl<V: VideoFrame> StatelessAV1DecoderBackend for VaapiBackend<V> {
         let slice_params = build_slice_params_for_tg(&tile_group)?;
         let slice_data = build_slice_data_for_tg(tile_group);
 
-        let context = &self.context;
+        let context = self.context()?;
 
         let buffer = context
             .create_buffer(slice_params)
@@ -588,9 +588,6 @@ impl<V: VideoFrame> StatelessDecoder<Av1, VaapiBackend<V>> {
         display: Rc<Display>,
         blocking_mode: BlockingMode,
     ) -> Result<Self, NewStatelessDecoderError> {
-        Self::new(
-            VaapiBackend::new(display, true).map_err(|_| NewStatelessDecoderError::DriverInitialization)?,
-            blocking_mode,
-        )
+        Self::new(VaapiBackend::new(display, true), blocking_mode)
     }
 }

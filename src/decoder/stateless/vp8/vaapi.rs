@@ -5,7 +5,6 @@
 use std::convert::TryFrom;
 use std::rc::Rc;
 
-use anyhow::anyhow;
 use anyhow::Context;
 use libva::BufferType;
 use libva::Display;
@@ -224,7 +223,7 @@ impl<V: VideoFrame> StatelessVp8DecoderBackend for VaapiBackend<V> {
     ) -> NewPictureResult<Self::Picture> {
         Ok(VaapiPicture::new(
             timestamp,
-            Rc::clone(&self.context),
+            Rc::clone(self.context()?),
             alloc_cb().ok_or(NewPictureError::OutOfOutputBuffers)?,
         )?)
     }
@@ -244,9 +243,8 @@ impl<V: VideoFrame> StatelessVp8DecoderBackend for VaapiBackend<V> {
         let golden_ref = va_surface_id(golden_ref);
         let alt_ref = va_surface_id(alt_ref);
 
-        let coded_resolution =
-            &self.stream_info().ok_or(anyhow!("No stream info found!"))?.coded_resolution;
-        let context = &self.context;
+        let sequence = self.negotiated()?;
+        let context = &sequence.context;
 
         let iq_buffer = context
             .create_buffer(build_iq_matrix(hdr, segmentation)?)
@@ -259,7 +257,7 @@ impl<V: VideoFrame> StatelessVp8DecoderBackend for VaapiBackend<V> {
         let pic_param = context
             .create_buffer(build_pic_param(
                 hdr,
-                &coded_resolution,
+                &sequence.stream_info.coded_resolution,
                 segmentation,
                 mb_lf_adjust,
                 last_ref,
@@ -293,10 +291,7 @@ impl<V: VideoFrame> StatelessDecoder<Vp8, VaapiBackend<V>> {
         display: Rc<Display>,
         blocking_mode: BlockingMode,
     ) -> Result<Self, NewStatelessDecoderError> {
-        Self::new(
-            VaapiBackend::new(display, false).map_err(|_| NewStatelessDecoderError::DriverInitialization)?,
-            blocking_mode,
-        )
+        Self::new(VaapiBackend::new(display, false), blocking_mode)
     }
 }
 
