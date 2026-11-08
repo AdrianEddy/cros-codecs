@@ -774,19 +774,45 @@ where
         Ok(RefPicLists { ref_pic_list0, ref_pic_list1 })
     }
 
+    /// 8.2.5.4: apply the picture's memory management control operations.
+    ///
+    /// An operation on a picture the DPB does not hold is skipped with a
+    /// warning, not an error. Decoding that starts at a non-IDR random access
+    /// point (an I picture a recovery point SEI marks, which containers list as a
+    /// sync sample) meets exactly that: the pictures after it in decode order
+    /// still mark pictures of the GOP before it, which were never decoded. The
+    /// marking they ask for is already the DPB's state, so nothing is lost.
+    /// libavcodec (`ff_h264_execute_ref_pic_marking`) and GStreamer
+    /// (`gst_h264_decoder_reference_picture_marking`) skip it the same way.
     fn handle_memory_management_ops(&mut self, pic: &mut PictureData) -> Result<(), MmcoError> {
         let markings = pic.ref_pic_marking.clone();
 
         for marking in &markings.inner {
-            match marking.memory_management_control_operation {
+            let applied = match marking.memory_management_control_operation {
                 0 => break,
-                1 => self.dpb.mmco_op_1(pic, marking)?,
-                2 => self.dpb.mmco_op_2(pic, marking)?,
-                3 => self.dpb.mmco_op_3(pic, marking)?,
-                4 => self.max_long_term_frame_idx = self.dpb.mmco_op_4(marking),
-                5 => self.max_long_term_frame_idx = self.dpb.mmco_op_5(pic),
-                6 => self.dpb.mmco_op_6(pic, marking),
+                1 => self.dpb.mmco_op_1(pic, marking),
+                2 => self.dpb.mmco_op_2(pic, marking),
+                3 => self.dpb.mmco_op_3(pic, marking),
+                4 => {
+                    self.max_long_term_frame_idx = self.dpb.mmco_op_4(marking);
+                    Ok(())
+                }
+                5 => {
+                    self.max_long_term_frame_idx = self.dpb.mmco_op_5(pic);
+                    Ok(())
+                }
+                6 => {
+                    self.dpb.mmco_op_6(pic, marking);
+                    Ok(())
+                }
                 other => return Err(MmcoError::UnknownMmco(other)),
+            };
+            if let Err(e) = applied {
+                log::warn!(
+                    "MMCO {} skipped: {e} (decoding started at a non-IDR random access point, or a \
+                     picture was lost)",
+                    marking.memory_management_control_operation
+                );
             }
         }
 

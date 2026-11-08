@@ -110,6 +110,7 @@ impl std::error::Error for StorePictureError {}
 #[derive(Debug)]
 pub enum MmcoError {
     NoShortTermPic,
+    NoLongTermPic,
     ExpectedMarked,
     ExpectedExisting,
     UnknownMmco(u8),
@@ -120,6 +121,9 @@ impl fmt::Display for MmcoError {
         match self {
             MmcoError::NoShortTermPic => {
                 write!(f, "could not find ShortTerm picture to mark in the DPB")
+            }
+            MmcoError::NoLongTermPic => {
+                write!(f, "could not find LongTerm picture to unmark in the DPB")
             }
             MmcoError::ExpectedMarked => {
                 write!(f, "a ShortTerm picture was expected to be marked for MMCO=3")
@@ -562,7 +566,7 @@ impl<T: Clone> Dpb<T> {
 
         let to_mark = self
             .find_long_term_with_long_term_pic_num(marking.long_term_pic_num)
-            .ok_or(MmcoError::NoShortTermPic)?;
+            .ok_or(MmcoError::NoLongTermPic)?;
 
         to_mark.pic.borrow_mut().set_reference(Reference::None, matches!(pic.field, Field::Frame));
 
@@ -1241,3 +1245,7 @@ impl<T> std::fmt::Debug for Dpb<T> {
             .finish()
     }
 }
+
+#[cfg(test)]
+#[path = "dpb_tests.rs"]
+mod tests;
