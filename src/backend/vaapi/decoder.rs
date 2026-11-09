@@ -2,6 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+use std::cell::Ref;
 use std::cell::RefCell;
 use std::marker::PhantomData;
 use std::rc::Rc;
@@ -26,8 +27,8 @@ use crate::DecodedFormat;
 use crate::Rect;
 use crate::Resolution;
 
-/// A decoded frame handle.
-pub(crate) type DecodedHandle<V> = Rc<RefCell<VaapiDecodedHandle<V>>>;
+/// The VA-API [`StatelessDecoderBackend::Handle`]: [`VaapiDecodedHandle`].
+pub(crate) type DecodedHandle<V> = VaapiDecodedHandle<V>;
 
 /// Gets the VASurfaceID for the given `picture`.
 pub(crate) fn va_surface_id<V: VideoFrame>(
@@ -35,15 +36,15 @@ pub(crate) fn va_surface_id<V: VideoFrame>(
 ) -> libva::VASurfaceID {
     match handle {
         None => libva::VA_INVALID_SURFACE,
-        Some(handle) => handle.borrow().surface().id(),
+        Some(handle) => handle.picture().surface().id(),
     }
 }
 
-impl<V: VideoFrame> DecodedHandleTrait for DecodedHandle<V> {
+impl<V: VideoFrame> DecodedHandleTrait for VaapiDecodedHandle<V> {
     type Frame = V;
 
     fn video_frame(&self) -> Arc<Self::Frame> {
-        self.borrow().backing_frame.clone()
+        self.picture.borrow().backing_frame.clone()
     }
 
     /// The grain-applied display frame when this handle carries one (AV1 film
@@ -51,31 +52,31 @@ impl<V: VideoFrame> DecodedHandleTrait for DecodedHandle<V> {
     /// [`Self::video_frame`] (and thus the DPB references) return. Overrides the
     /// trait default so output ≠ DPB reference for grain frames.
     fn display_frame(&self) -> Arc<Self::Frame> {
-        let handle = self.borrow();
-        match &handle.display {
+        let picture = self.picture.borrow();
+        match &picture.display {
             Some(display) => display.frame.clone(),
-            None => handle.backing_frame.clone(),
+            None => picture.backing_frame.clone(),
         }
     }
 
     fn coded_resolution(&self) -> Resolution {
-        self.borrow().surface().size().into()
+        self.picture.borrow().surface().size().into()
     }
 
     fn display_resolution(&self) -> Resolution {
-        self.borrow().display_resolution
+        self.picture.borrow().display_resolution
     }
 
     fn timestamp(&self) -> u64 {
-        self.borrow().timestamp()
+        self.timestamp
     }
 
     fn is_ready(&self) -> bool {
-        self.borrow().state.is_ready().unwrap_or(true)
+        self.picture.borrow().state.is_ready().unwrap_or(true)
     }
 
     fn sync(&self) -> anyhow::Result<()> {
-        self.borrow_mut().sync().context("while syncing picture")?;
+        self.picture.borrow_mut().sync().context("while syncing picture")?;
 
         Ok(())
     }
@@ -161,7 +162,7 @@ impl<M: SurfaceMemoryDescriptor> PictureState<M> {
 /// AV1 film grain is applied outside the coding loop, so the frame kept as a DPB
 /// reference must stay grain-free while the presented frame carries the grain.
 /// When a picture applies grain, the decode renders the grain-free reconstruct
-/// into the [`VaapiPicture`]/[`VaapiDecodedHandle`] `backing_frame` surface (the
+/// into the [`VaapiPicture`]/[`VaapiDecodedPicture`] `backing_frame` surface (the
 /// DPB reference) and the driver writes the grain-applied output into this
 /// separate surface (`current_display_picture` in the AV1 picture parameter).
 /// Both come from the same caller pool (a second `alloc_cb`). `frame` is what
@@ -173,22 +174,45 @@ struct VaapiDisplayTarget<V: VideoFrame> {
     surface: Surface<<V as VideoFrame>::MemDescriptor>,
 }
 
-/// VA-API backend handle.
+/// VA-API backend handle: a decoded picture, and the timestamp this handle shows it at.
+///
+/// The picture is shared by every handle that shows it: the one its decode returned,
+/// and each one [`StatelessDecoderBackend::duplicate_handle`] makes when a later unit
+/// shows it again (an AV1 or VP9 `show_existing_frame`), under that unit's timestamp.
+pub struct VaapiDecodedHandle<V: VideoFrame> {
+    picture: Rc<RefCell<VaapiDecodedPicture<V>>>,
+    timestamp: u64,
+}
+
+impl<V: VideoFrame> Clone for VaapiDecodedHandle<V> {
+    fn clone(&self) -> Self {
+        Self { picture: Rc::clone(&self.picture), timestamp: self.timestamp }
+    }
+}
+
+impl<V: VideoFrame> VaapiDecodedHandle<V> {
+    /// The decoded picture this handle shows.
+    pub(crate) fn picture(&self) -> Ref<'_, VaapiDecodedPicture<V>> {
+        self.picture.borrow()
+    }
+}
+
+/// A decoded VA picture.
 ///
 /// This includes the VA picture which can be pending rendering or complete, as well as useful
 /// meta-information.
-pub struct VaapiDecodedHandle<V: VideoFrame> {
+pub(crate) struct VaapiDecodedPicture<V: VideoFrame> {
     backing_frame: Arc<V>,
     state: PictureState<<V as VideoFrame>::MemDescriptor>,
     /// Actual resolution of the visible rectangle in the decoded buffer.
     display_resolution: Resolution,
-    /// The grain-applied display target when this handle applies AV1 film grain;
+    /// The grain-applied display target when this picture applies AV1 film grain;
     /// `None` when output == reconstruct (the common case).
     display: Option<VaapiDisplayTarget<V>>,
 }
 
-impl<V: VideoFrame> VaapiDecodedHandle<V> {
-    /// Creates a new pending handle on `surface_id`.
+impl<V: VideoFrame> VaapiDecodedPicture<V> {
+    /// Creates a new pending picture on `surface_id`.
     fn new(picture: VaapiPicture<V>, display_resolution: Resolution) -> anyhow::Result<Self> {
         let backing_frame = picture.backing_frame;
         let display = picture.display;
@@ -224,11 +248,6 @@ impl<V: VideoFrame> VaapiDecodedHandle<V> {
 
     pub(crate) fn surface(&self) -> &Surface<<V as VideoFrame>::MemDescriptor> {
         self.state.surface()
-    }
-
-    /// Returns the timestamp of this handle.
-    fn timestamp(&self) -> u64 {
-        self.state.timestamp()
     }
 }
 
@@ -385,7 +404,11 @@ impl<V: VideoFrame> VaapiBackend<V> {
         for<'a> &'a Codec::FormatInfo: VaStreamInfo,
     {
         let display_resolution = self.negotiated()?.stream_info.display_resolution;
-        Ok(Rc::new(RefCell::new(VaapiDecodedHandle::new(picture, display_resolution)?)))
+        let picture = VaapiDecodedPicture::new(picture, display_resolution)?;
+        // The unit that decoded the picture shows it, unless the picture is hidden
+        // and a later unit shows it (`duplicate_handle`).
+        let timestamp = picture.state.timestamp();
+        Ok(VaapiDecodedHandle { picture: Rc::new(RefCell::new(picture)), timestamp })
     }
 }
 
@@ -394,7 +417,7 @@ pub struct VaapiPicture<V: VideoFrame> {
     picture: Picture<PictureNew, Surface<V::MemDescriptor>>,
     backing_frame: Arc<V>,
     /// The grain-applied display target for AV1 film grain; `None` when
-    /// output == reconstruct. Threaded onto the [`VaapiDecodedHandle`] at submit.
+    /// output == reconstruct. Threaded onto the [`VaapiDecodedPicture`] at submit.
     display: Option<VaapiDisplayTarget<V>>,
 }
 
@@ -464,5 +487,9 @@ impl<V: VideoFrame> StatelessDecoderBackend for VaapiBackend<V> {
     fn reset_backend(&mut self) -> anyhow::Result<()> {
         //TODO(bchoobineh): Implement VAAPI DRC
         Ok(())
+    }
+
+    fn duplicate_handle(&self, handle: &Self::Handle, timestamp: u64) -> Self::Handle {
+        VaapiDecodedHandle { timestamp, ..handle.clone() }
     }
 }

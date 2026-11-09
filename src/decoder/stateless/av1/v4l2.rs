@@ -67,16 +67,17 @@ impl<V: VideoFrame> StatelessAV1DecoderBackend for V4l2StatelessDecoderBackend<V
     fn new_picture(
         &mut self,
         _hdr: &FrameHeaderObu,
-        _timestamp: u64,
+        timestamp: u64,
         alloc_cb: &mut dyn FnMut() -> Option<V>,
     ) -> NewPictureResult<Self::Picture> {
-        let timestamp = self.frame_counter;
+        // A temporal unit's pictures share its timestamp, so the requests are numbered.
+        let request_timestamp = self.frame_counter;
         let frame = alloc_cb().ok_or(NewPictureError::OutOfOutputBuffers)?;
-        let request_buffer = match self.device.alloc_request(timestamp, frame) {
+        let request_buffer = match self.device.alloc_request(request_timestamp, frame) {
             Ok(buffer) => buffer,
             _ => return Err(NewPictureError::OutOfOutputBuffers),
         };
-        let picture = Rc::new(RefCell::new(V4l2Picture::new(request_buffer.clone())));
+        let picture = Rc::new(RefCell::new(V4l2Picture::new(request_buffer.clone(), timestamp)));
         request_buffer
             .as_ref()
             .borrow_mut()

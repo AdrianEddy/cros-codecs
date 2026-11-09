@@ -83,7 +83,7 @@ impl<V: VideoFrame> StatelessH264DecoderBackend for V4l2StatelessDecoderBackend<
             _ => return Err(NewPictureError::OutOfOutputBuffers),
         };
 
-        let picture = Rc::new(RefCell::new(V4l2Picture::new(request_buffer.clone())));
+        let picture = Rc::new(RefCell::new(V4l2Picture::new(request_buffer.clone(), timestamp)));
         request_buffer
             .as_ref()
             .borrow_mut()
@@ -112,7 +112,7 @@ impl<V: VideoFrame> StatelessH264DecoderBackend for V4l2StatelessDecoderBackend<
                 None => todo!(),
             };
             dpb_entries.push(V4l2CtrlH264DpbEntry {
-                timestamp: ref_picture.borrow().timestamp(),
+                timestamp: ref_picture.borrow().reference_timestamp(),
                 pic: entry.pic.clone(),
             });
             ref_pictures.push(ref_picture);
@@ -166,10 +166,7 @@ impl<V: VideoFrame> StatelessH264DecoderBackend for V4l2StatelessDecoderBackend<
         let request = picture.borrow_mut().request();
         let mut request = request.as_ref().borrow_mut();
         request.submit()?;
-        Ok(V4l2StatelessDecoderHandle {
-            picture: picture.clone(),
-            stream_info: self.stream_info.clone(),
-        })
+        Ok(V4l2StatelessDecoderHandle::new(picture.clone(), self.stream_info.clone()))
     }
 }
 

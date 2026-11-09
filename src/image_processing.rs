@@ -11,9 +11,6 @@ use crate::DecodedFormat;
 use byteorder::ByteOrder;
 use byteorder::LittleEndian;
 
-#[cfg(feature = "v4l2")]
-use std::arch::aarch64::*;
-
 pub const MM21_TILE_WIDTH: usize = 16;
 pub const MM21_TILE_HEIGHT: usize = 32;
 
@@ -201,10 +198,10 @@ pub unsafe fn detile_row(
 ) {
     let mut w = width;
     while w > 0 {
-        let v0: uint8x16_t = vld1q_u8(src);
+        // A constant 16-byte copy: one vector load and store, on aarch64 and x86_64 alike.
+        std::ptr::copy_nonoverlapping(src, dst, MM21_TILE_WIDTH);
         src = src.offset(src_tile_stride as isize);
         w = w - MM21_TILE_WIDTH;
-        vst1q_u8(dst, v0);
         dst = dst.offset(MM21_TILE_WIDTH as isize);
     }
 }
@@ -296,7 +293,7 @@ pub fn mm21_to_nv12(
     width: usize,
     height: isize,
 ) -> Result<(), String> {
-    if width <= 0 {
+    if width == 0 {
         return Err("Width must be greater than 0.".to_owned());
     }
 

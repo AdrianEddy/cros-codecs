@@ -140,7 +140,12 @@ pub trait DecodedHandle {
         self.video_frame()
     }
 
-    /// Returns the timestamp of the picture.
+    /// Returns the timestamp of the unit this output belongs to: the `timestamp` that
+    /// [`decode`](stateless::StatelessVideoDecoder::decode) was given for the unit that
+    /// shows the picture. A picture an AV1 or VP9 `show_existing_frame` shows comes out
+    /// under the showing unit's timestamp, not the decoding unit's, so two handles of one
+    /// picture can carry different timestamps (see
+    /// [`duplicate_handle`](stateless::StatelessDecoderBackend::duplicate_handle)).
     fn timestamp(&self) -> u64;
 
     /// Returns the coded resolution at the time this handle was decoded.

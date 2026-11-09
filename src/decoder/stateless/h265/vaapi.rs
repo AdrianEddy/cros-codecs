@@ -415,7 +415,7 @@ fn build_pic_param<V: VideoFrame>(
     let mut reference_frames = vec![];
 
     for ref_pic in dpb.get_all_references() {
-        let surface_id = ref_pic.1.borrow().surface().id();
+        let surface_id = ref_pic.1.picture().surface().id();
         let ref_pic = fill_va_hevc_pic(&ref_pic.0.borrow(), surface_id, rps);
         reference_frames.push(ref_pic);
     }

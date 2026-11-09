@@ -63,18 +63,19 @@ impl<V: VideoFrame> StatelessVp9DecoderBackend for V4l2StatelessDecoderBackend<V
 
     fn new_picture(
         &mut self,
-        _timestamp: u64,
+        timestamp: u64,
         alloc_cb: &mut dyn FnMut() -> Option<
             <<Self as StatelessDecoderBackend>::Handle as DecodedHandle>::Frame,
         >,
     ) -> NewPictureResult<Self::Picture> {
-        let timestamp = self.frame_counter;
+        // A superframe's pictures share its timestamp, so the requests are numbered.
+        let request_timestamp = self.frame_counter;
         let frame = alloc_cb().ok_or(NewPictureError::OutOfOutputBuffers)?;
-        let request_buffer = match self.device.alloc_request(timestamp, frame) {
+        let request_buffer = match self.device.alloc_request(request_timestamp, frame) {
             Ok(buffer) => buffer,
             _ => return Err(NewPictureError::OutOfOutputBuffers),
         };
-        let picture = Rc::new(RefCell::new(V4l2Picture::new(request_buffer.clone())));
+        let picture = Rc::new(RefCell::new(V4l2Picture::new(request_buffer.clone(), timestamp)));
         request_buffer
             .as_ref()
             .borrow_mut()
@@ -99,17 +100,17 @@ impl<V: VideoFrame> StatelessVp9DecoderBackend for V4l2StatelessDecoderBackend<V
         let alt_frame_idx = hdr.ref_frame_idx[ALTREF_FRAME - 1];
 
         let last_frame_ts = match &reference_frames[last_frame_idx as usize] {
-            Some(handle) => handle.timestamp(),
+            Some(handle) => handle.picture.borrow().reference_timestamp(),
             None => 0,
         };
 
         let golden_frame_ts = match &reference_frames[golden_frame_idx as usize] {
-            Some(handle) => handle.timestamp(),
+            Some(handle) => handle.picture.borrow().reference_timestamp(),
             None => 0,
         };
 
         let alt_frame_ts = match &reference_frames[alt_frame_idx as usize] {
-            Some(handle) => handle.timestamp(),
+            Some(handle) => handle.picture.borrow().reference_timestamp(),
             None => 0,
         };
 
@@ -140,10 +141,7 @@ impl<V: VideoFrame> StatelessVp9DecoderBackend for V4l2StatelessDecoderBackend<V
         request.write(bitstream);
         request.submit()?;
 
-        Ok(V4l2StatelessDecoderHandle {
-            picture: picture.clone(),
-            stream_info: self.stream_info.clone(),
-        })
+        Ok(V4l2StatelessDecoderHandle::new(picture.clone(), self.stream_info.clone()))
     }
 }
 

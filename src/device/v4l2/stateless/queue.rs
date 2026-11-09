@@ -42,6 +42,7 @@ use v4l2r::nix::sys::time::TimeVal;
 use v4l2r::Format;
 use v4l2r::PlaneLayout;
 
+use crate::backend::v4l2::Timestamp;
 use crate::decoder::stateless::DecodeError;
 use crate::decoder::stateless::NewStatelessDecoderError;
 use crate::decoder::stateless::StatelessBackendError;
@@ -209,7 +210,7 @@ impl V4l2OutputBuffer {
         match handle {
             V4l2OutputQueueHandle::Streaming(_) => {
                 self.handle
-                    .set_timestamp(TimeVal::new(/* FIXME: sec */ 0, timestamp as i64))
+                    .set_timestamp(TimeVal::from(&Timestamp(timestamp)))
                     .set_request(request_fd)
                     .queue(&[self.length])?;
                 Ok(())
@@ -331,8 +332,10 @@ impl<V: VideoFrame> V4l2CaptureBuffer<V> {
     fn new(frame: Arc<V>, handle: DqBuffer<Capture, V4l2VideoFrame<V>>) -> Self {
         Self { frame, handle }
     }
+    /// The timestamp of the request decoded into this buffer: the one its output
+    /// buffer was queued with, which the driver copies to the capture buffer.
     pub fn timestamp(&self) -> u64 {
-        self.handle.data.timestamp().tv_usec as u64
+        Timestamp::from(self.handle.data.timestamp()).0
     }
     // TODO enable once upstream v4l2r has rolled
     //    pub fn has_error(&self) -> bool {

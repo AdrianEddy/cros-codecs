@@ -155,8 +155,13 @@ where
         Ok(())
     }
 
-    /// Handle a frame which `show_existing_frame` flag is `true`.
-    fn handle_show_existing_frame(&mut self, frame_to_show_map_idx: u8) -> Result<(), DecodeError> {
+    /// Handle a frame which `show_existing_frame` flag is `true`: output the reference
+    /// picture it names under `timestamp`, the timestamp of the chunk that shows it.
+    fn handle_show_existing_frame(
+        &mut self,
+        frame_to_show_map_idx: u8,
+        timestamp: u64,
+    ) -> Result<(), DecodeError> {
         // Frame to be shown. Because the spec mandates that frame_to_show_map_idx references a
         // valid entry in the DPB, an non-existing index means that the stream is invalid.
         let idx = usize::from(frame_to_show_map_idx);
@@ -169,7 +174,7 @@ where
             .ok_or_else(|| anyhow::anyhow!("empty reference frame referenced in frame header"))?;
 
         // We are done, no further processing needed.
-        let decoded_handle = ref_frame.clone();
+        let decoded_handle = self.backend.duplicate_handle(ref_frame, timestamp);
 
         self.ready_queue.push(decoded_handle);
 
@@ -294,13 +299,15 @@ where
                 return Err(DecodeError::CheckEvents);
             }
             DecodingState::Decoding => {
-                // First allocate all the pictures we need for this superframe.
+                // First allocate all the pictures we need for this superframe. Short of
+                // output buffers, ask for the ones not allocated yet: a show-existing
+                // frame takes none.
                 let num_required_pictures =
                     frames.iter().filter(|f| !f.header.show_existing_frame).count();
+                let mut num_allocated_pictures = 0;
                 let frames_with_pictures = frames
                     .into_iter()
-                    .enumerate()
-                    .map(|(i, frame)| {
+                    .map(|frame| {
                         if frame.header.show_existing_frame {
                             Ok((frame, None))
                         } else {
@@ -309,12 +316,15 @@ where
                                 .map_err(|e| match e {
                                     NewPictureError::OutOfOutputBuffers => {
                                         DecodeError::NotEnoughOutputBuffers(
-                                            num_required_pictures - i,
+                                            num_required_pictures - num_allocated_pictures,
                                         )
                                     }
                                     e => DecodeError::from(e),
                                 })
-                                .map(|picture| (frame, Some(picture)))
+                                .map(|picture| {
+                                    num_allocated_pictures += 1;
+                                    (frame, Some(picture))
+                                })
                         }
                     })
                     .collect::<Result<Vec<_>, _>>()?;
@@ -322,9 +332,10 @@ where
                 // Then process each frame.
                 for (frame, picture) in frames_with_pictures {
                     match picture {
-                        None => {
-                            self.handle_show_existing_frame(frame.header.frame_to_show_map_idx)?
-                        }
+                        None => self.handle_show_existing_frame(
+                            frame.header.frame_to_show_map_idx,
+                            timestamp,
+                        )?,
                         Some(picture) => self.handle_frame(&frame, picture)?,
                     }
                 }

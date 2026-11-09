@@ -67,7 +67,7 @@ impl<V: VideoFrame> StatelessVp8DecoderBackend for V4l2StatelessDecoderBackend<V
             Ok(buffer) => buffer,
             _ => return Err(NewPictureError::OutOfOutputBuffers),
         };
-        let picture = Rc::new(RefCell::new(V4l2Picture::new(request_buffer.clone())));
+        let picture = Rc::new(RefCell::new(V4l2Picture::new(request_buffer.clone(), timestamp)));
         request_buffer
             .as_ref()
             .borrow_mut()
@@ -101,7 +101,7 @@ impl<V: VideoFrame> StatelessVp8DecoderBackend for V4l2StatelessDecoderBackend<V
         match &last_ref {
             Some(handle) => {
                 ref_pictures.push(handle.picture.clone());
-                last_frame_ts = handle.timestamp();
+                last_frame_ts = handle.picture.borrow().reference_timestamp();
             }
             None => (),
         };
@@ -109,7 +109,7 @@ impl<V: VideoFrame> StatelessVp8DecoderBackend for V4l2StatelessDecoderBackend<V
         match &golden_ref {
             Some(handle) => {
                 ref_pictures.push(handle.picture.clone());
-                golden_frame_ts = handle.timestamp();
+                golden_frame_ts = handle.picture.borrow().reference_timestamp();
             }
             None => (),
         };
@@ -117,7 +117,7 @@ impl<V: VideoFrame> StatelessVp8DecoderBackend for V4l2StatelessDecoderBackend<V
         match &alt_ref {
             Some(handle) => {
                 ref_pictures.push(handle.picture.clone());
-                alt_frame_ts = handle.timestamp();
+                alt_frame_ts = handle.picture.borrow().reference_timestamp();
             }
             None => (),
         };
@@ -137,10 +137,7 @@ impl<V: VideoFrame> StatelessVp8DecoderBackend for V4l2StatelessDecoderBackend<V
         request.ioctl(&vp8_frame_params)?;
 
         request.submit()?;
-        Ok(V4l2StatelessDecoderHandle {
-            picture: picture.clone(),
-            stream_info: self.stream_info.clone(),
-        })
+        Ok(V4l2StatelessDecoderHandle::new(picture.clone(), self.stream_info.clone()))
     }
 }
 

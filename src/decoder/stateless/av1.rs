@@ -109,7 +109,9 @@ enum CurrentPicState<H: DecodedHandle, P> {
     ShowExistingFrame {
         /// Data for the current picture as extracted from the stream.
         header: FrameHeaderObu,
-        /// The handle of the reference frame that this frame points to.
+        /// The reference picture this frame points to, as a handle that shows it at
+        /// the timestamp of the temporal unit holding this frame
+        /// ([`StatelessDecoderBackend::duplicate_handle`]).
         handle: H,
     },
 }
@@ -187,9 +189,11 @@ where
                 [frame_header.frame_to_show_map_idx as usize]
                 .as_ref()
                 .ok_or(anyhow!("Broken stream: no reference picture to display"))?;
+            // The picture comes out under this temporal unit's timestamp, not under
+            // the one of the unit that decoded it.
             self.codec.current_pic = Some(CurrentPicState::ShowExistingFrame {
                 header: frame_header,
-                handle: ref_frame.clone(),
+                handle: self.backend.duplicate_handle(ref_frame, timestamp),
             });
         } else if let Some(stream_info) = &self.codec.stream_info {
             let mut backend_picture =

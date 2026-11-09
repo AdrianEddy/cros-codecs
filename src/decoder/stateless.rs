@@ -166,6 +166,24 @@ pub trait StatelessDecoderBackend {
 
     // Resets the backend decoder to accommodate for a format change event.
     fn reset_backend(&mut self) -> anyhow::Result<()>;
+
+    /// The handle that shows `handle`'s picture again, at `timestamp`.
+    ///
+    /// An AV1 or VP9 `show_existing_frame` outputs a picture an earlier unit decoded,
+    /// and that output belongs to the unit that shows it: it carries the showing
+    /// unit's timestamp, as libavcodec (the packet's pts) and Chromium (a duplicate
+    /// picture under the current bitstream id) output it. Otherwise a hidden picture
+    /// would come out under the timestamp of the unit that decoded it, beside that
+    /// unit's own shown picture, and the showing unit's timestamp would never come
+    /// out at all.
+    ///
+    /// The returned handle shares everything else with `handle`: the decoded
+    /// picture's memory and decode state, and whatever the backend identifies a
+    /// reference picture by. Only its [`DecodedHandle::timestamp`] differs, so the
+    /// decoder may keep it as a reference in `handle`'s place (an AV1 key frame shown
+    /// again refreshes every reference slot with it). Both handles may be held at
+    /// once; the picture's memory is released when the last one goes.
+    fn duplicate_handle(&self, handle: &Self::Handle, timestamp: u64) -> Self::Handle;
 }
 
 /// Stateless video decoder interface.
@@ -460,3 +478,6 @@ where
         })
     }
 }
+
+#[cfg(test)]
+mod show_existing_frame_tests;

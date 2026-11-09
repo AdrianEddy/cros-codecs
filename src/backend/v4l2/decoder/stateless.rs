@@ -22,6 +22,8 @@ use crate::Resolution;
 
 pub struct V4l2Picture<V: VideoFrame> {
     request: Rc<RefCell<V4l2Request<V>>>,
+    /// The timestamp of the unit the picture is decoded from, as the caller gave it.
+    timestamp: u64,
     // To properly decode stream while output and capture queues
     // are processed independently it's required for v4l2 backend
     // to maintain DPB buffer recycling. The following vector
@@ -31,13 +33,21 @@ pub struct V4l2Picture<V: VideoFrame> {
 }
 
 impl<V: VideoFrame> V4l2Picture<V> {
-    pub fn new(request: Rc<RefCell<V4l2Request<V>>>) -> Self {
-        Self { request, ref_pictures: None }
+    pub fn new(request: Rc<RefCell<V4l2Request<V>>>, timestamp: u64) -> Self {
+        Self { request, timestamp, ref_pictures: None }
     }
     pub fn video_frame(&self) -> Arc<V> {
         self.request.as_ref().borrow().result().capture_buffer.borrow().frame.clone()
     }
+    /// The timestamp of the unit the picture is decoded from.
     pub fn timestamp(&self) -> u64 {
+        self.timestamp
+    }
+    /// The timestamp V4L2 knows the picture by: its request's, which a later picture
+    /// names to reference it. A codec whose units may hold several pictures (VP9
+    /// superframes, AV1 temporal units) numbers its requests instead of using the
+    /// unit's timestamp, so the two can differ.
+    pub fn reference_timestamp(&self) -> u64 {
         self.request.as_ref().borrow().timestamp()
     }
     pub fn set_ref_pictures(
@@ -63,11 +73,27 @@ impl<V: VideoFrame> V4l2Picture<V> {
 pub struct V4l2StatelessDecoderHandle<V: VideoFrame> {
     pub picture: Rc<RefCell<V4l2Picture<V>>>,
     pub stream_info: StreamInfo,
+    /// The timestamp this handle shows the picture at: the one of the unit it is
+    /// decoded from, or of a later unit that shows it again
+    /// ([`StatelessDecoderBackend::duplicate_handle`]).
+    pub timestamp: u64,
+}
+
+impl<V: VideoFrame> V4l2StatelessDecoderHandle<V> {
+    /// The handle of `picture`, shown by the unit it is decoded from.
+    pub fn new(picture: Rc<RefCell<V4l2Picture<V>>>, stream_info: StreamInfo) -> Self {
+        let timestamp = picture.borrow().timestamp();
+        Self { picture, stream_info, timestamp }
+    }
 }
 
 impl<V: VideoFrame> Clone for V4l2StatelessDecoderHandle<V> {
     fn clone(&self) -> Self {
-        Self { picture: Rc::clone(&self.picture), stream_info: self.stream_info.clone() }
+        Self {
+            picture: Rc::clone(&self.picture),
+            stream_info: self.stream_info.clone(),
+            timestamp: self.timestamp,
+        }
     }
 }
 
@@ -87,7 +113,7 @@ impl<V: VideoFrame> DecodedHandle for V4l2StatelessDecoderHandle<V> {
     }
 
     fn timestamp(&self) -> u64 {
-        self.picture.borrow().timestamp()
+        self.timestamp
     }
 
     fn sync(&self) -> anyhow::Result<()> {
@@ -153,5 +179,9 @@ impl<V: VideoFrame> StatelessDecoderBackend for V4l2StatelessDecoderBackend<V> {
 
     fn reset_backend(&mut self) -> anyhow::Result<()> {
         Ok(self.device.reset_queues()?)
+    }
+
+    fn duplicate_handle(&self, handle: &Self::Handle, timestamp: u64) -> Self::Handle {
+        V4l2StatelessDecoderHandle { timestamp, ..handle.clone() }
     }
 }

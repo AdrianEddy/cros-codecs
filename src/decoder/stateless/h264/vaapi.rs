@@ -560,7 +560,7 @@ impl<V: VideoFrame> StatelessH264DecoderBackend for VaapiBackend<V> {
         first_field: &Self::Handle,
     ) -> NewPictureResult<Self::Picture> {
         // Decode to the same surface as the first field picture.
-        Ok(first_field.borrow().new_picture_from_same_surface(timestamp))
+        Ok(first_field.picture().new_picture_from_same_surface(timestamp))
     }
 }
 

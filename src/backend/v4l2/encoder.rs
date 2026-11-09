@@ -61,6 +61,7 @@ use v4l2r::PixelFormat;
 use v4l2r::QueueDirection;
 use v4l2r::QueueType;
 
+use crate::backend::v4l2::Timestamp;
 use crate::encoder::stateful::BackendOutput;
 use crate::encoder::stateful::BackendRequest;
 use crate::encoder::stateful::BackendRequestId;
@@ -235,27 +236,6 @@ impl From<BackendError> for StatefulBackendError {
 impl From<BackendError> for EncodeError {
     fn from(value: BackendError) -> Self {
         EncodeError::StatefulBackendError(value.into())
-    }
-}
-
-/// Frame timestamp helper struct
-#[repr(transparent)]
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub struct Timestamp(pub u64);
-
-impl From<v4l2r::bindings::timeval> for Timestamp {
-    fn from(value: v4l2r::bindings::timeval) -> Self {
-        let timestamp = value.tv_sec.wrapping_mul(1_000_000);
-        let timestamp = timestamp.wrapping_add(value.tv_usec);
-        Timestamp(timestamp.max(0) as u64)
-    }
-}
-
-impl From<&Timestamp> for TimeVal {
-    fn from(value: &Timestamp) -> Self {
-        let tv_sec = (value.0 / 1_000_000).min(i64::MAX as u64);
-        let tv_usec = (value.0 % 1_000_000).min(i64::MAX as u64);
-        Self::new(tv_sec as i64, tv_usec as i64)
     }
 }
 
