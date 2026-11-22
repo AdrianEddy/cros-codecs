@@ -2240,6 +2240,10 @@ impl Parser {
             temporal_id_nesting_flag: r.read_bit()?,
             ..Default::default()
         };
+        // 0..=6 (7.4.3.1); the per-sub-layer arrays hold 7 entries.
+        if vps.max_sub_layers_minus1 > 6 {
+            return Err(format!("Invalid vps_max_sub_layers_minus1 {}", vps.max_sub_layers_minus1));
+        }
 
         r.skip_bits(16)?; // vps_reserved_0xffff_16bits
 
@@ -3108,6 +3112,10 @@ impl Parser {
             vps,
             ..Default::default()
         };
+        // 0..=6 (7.4.3.2.1); the per-sub-layer arrays hold 7 entries.
+        if sps.max_sub_layers_minus1 > 6 {
+            return Err(format!("Invalid sps_max_sub_layers_minus1 {}", sps.max_sub_layers_minus1));
+        }
 
         Self::parse_profile_tier_level(
             &mut sps.profile_tier_level,

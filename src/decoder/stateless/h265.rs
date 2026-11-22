@@ -2,6 +2,8 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#[cfg(test)]
+mod negotiation_tests;
 #[cfg(feature = "vaapi")]
 mod vaapi;
 
@@ -118,6 +120,14 @@ struct NegotiationInfo {
     bit_depth_luma_minus8: u8,
     bit_depth_chroma_minus8: u8,
     chroma_format_idc: u8,
+    /// The colour planes of a 4:4:4 sequence are coded apart
+    /// (`ChromaArrayType` 0), at the same `chroma_format_idc`.
+    separate_colour_plane_flag: bool,
+    /// `sps_max_dec_pic_buffering_minus1[HighestTid]`: the decoded picture
+    /// buffer the sequence needs, the current picture included, which a backend
+    /// sizes its reference storage by. It changes apart from the level's
+    /// `MaxDpbSize`, which sizes this decoder's own DPB.
+    max_dec_pic_buffering_minus1: u8,
 }
 
 impl From<&Sps> for NegotiationInfo {
@@ -128,6 +138,11 @@ impl From<&Sps> for NegotiationInfo {
             bit_depth_luma_minus8: sps.bit_depth_luma_minus8,
             bit_depth_chroma_minus8: sps.bit_depth_chroma_minus8,
             chroma_format_idc: sps.chroma_format_idc,
+            separate_colour_plane_flag: sps.separate_colour_plane_flag,
+            // The highest sub-layer's entry is coded whatever
+            // `sps_sub_layer_ordering_info_present_flag` says.
+            max_dec_pic_buffering_minus1: sps.max_dec_pic_buffering_minus1
+                [usize::from(sps.max_sub_layers_minus1)],
         }
     }
 }

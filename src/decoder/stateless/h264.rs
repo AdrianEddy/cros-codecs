@@ -2,6 +2,8 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#[cfg(test)]
+mod negotiation_tests;
 #[cfg(feature = "v4l2")]
 mod v4l2;
 #[cfg(feature = "vaapi")]
@@ -147,8 +149,17 @@ struct NegotiationInfo {
     bit_depth_chroma_minus8: u8,
     /// Same meaning as the specification.
     chroma_format_idc: u8,
+    /// Same meaning as the specification: the colour planes of a 4:4:4
+    /// sequence are coded as pictures of their own (`ChromaArrayType` 0), at
+    /// the same `chroma_format_idc`.
+    separate_colour_plane_flag: bool,
     /// The maximum size of the dpb in frames.
     max_dpb_frames: usize,
+    /// Same meaning as the specification: the most reference frames the
+    /// sequence holds, which a backend sizes its reference storage by. It
+    /// changes apart from `max_dpb_frames`, which is the level's bound when the
+    /// VUI states no `max_dec_frame_buffering`.
+    max_num_ref_frames: u8,
     /// Whether this is an interlaced stream
     interlaced: bool,
 }
@@ -161,7 +172,9 @@ impl From<&Sps> for NegotiationInfo {
             bit_depth_luma_minus8: sps.bit_depth_luma_minus8,
             bit_depth_chroma_minus8: sps.bit_depth_chroma_minus8,
             chroma_format_idc: sps.chroma_format_idc,
+            separate_colour_plane_flag: sps.separate_colour_plane_flag,
             max_dpb_frames: sps.max_dpb_frames(),
+            max_num_ref_frames: sps.max_num_ref_frames,
             interlaced: !sps.frame_mbs_only_flag,
         }
     }
