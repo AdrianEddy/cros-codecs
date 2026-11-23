@@ -4,6 +4,7 @@
 
 use std::rc::Rc;
 
+use crate::codec::h264::parser::NaluType;
 use crate::codec::h264::parser::Pps;
 use crate::codec::h264::parser::SliceHeader;
 use crate::codec::h264::parser::Sps;
@@ -42,10 +43,40 @@ pub enum IsReference {
 
 #[derive(Clone, Debug)]
 pub struct DpbEntryMeta {
-    /// Picture order count
-    pub poc: u16,
+    /// The picture order count, in full (H.264 8.2.1): what VA-API's `TopFieldOrderCnt` and
+    /// Vulkan Video's `PicOrderCnt` take. The slice header states it modulo `MaxPicOrderCntLsb`.
+    pub poc: i32,
+    /// `FrameNum`, the picture's `frame_num` (H.264 7.4.3): the count of the reference frames
+    /// that precede it from the IDR on, modulo `MaxFrameNum`. VA-API's `frame_idx` and Vulkan
+    /// Video's `frame_num` and `FrameNum` take it as it is.
     pub frame_num: u32,
     pub is_reference: IsReference,
+}
+
+/// The parameter sets an access unit opens with.
+///
+/// The SPS holds for a whole coded video sequence (H.264 7.4.1.2.1), so it changes only at an
+/// IDR; every IDR restates it, and the PPS with it. The PPS may change between any two pictures.
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+pub enum ParameterSets {
+    /// None: the active SPS and PPS hold.
+    None,
+    /// The PPS alone, on the first frame after its content changed.
+    Pps,
+    /// The SPS and the PPS, on an IDR.
+    SpsAndPps,
+}
+
+impl ParameterSets {
+    /// The access unit states the SPS (and so starts with it).
+    pub fn sps(self) -> bool {
+        self == Self::SpsAndPps
+    }
+
+    /// The access unit states the PPS.
+    pub fn pps(self) -> bool {
+        self != Self::None
+    }
 }
 
 /// Frame structure used in the backend representing currently encoded frame or references used
@@ -88,12 +119,32 @@ pub struct BackendRequest<P, R> {
     /// True whenever the result is IDR
     pub is_idr: bool,
 
+    /// The parameter sets the access unit opens with. The predictor has written them into
+    /// [`Self::coded_output`] when [`EncoderConfig::emit_parameter_sets`] is set; otherwise the
+    /// backend states them (packed headers, or what its driver writes).
+    pub parameter_sets: ParameterSets,
+
     /// [`Tunings`] for the frame
     pub tunings: Tunings,
 
     /// Container for the request output. [`StatelessH264EncoderBackend`] impl shall move it and
     /// append the slice data to it. This prevents unnecessary copying of bitstream around.
     pub coded_output: Vec<u8>,
+}
+
+impl<P, R> BackendRequest<P, R> {
+    /// The NAL unit header of the frame's slices, `(nal_ref_idc, nal_unit_type)`: 3 and
+    /// [`NaluType::SliceIdr`] for an IDR, 2 and [`NaluType::Slice`] for another reference
+    /// picture, 0 and [`NaluType::Slice`] for a picture nothing references (H.264 7.4.1).
+    pub fn slice_nal_header(&self) -> (u8, NaluType) {
+        if self.is_idr {
+            (3, NaluType::SliceIdr)
+        } else if self.dpb_meta.is_reference == IsReference::No {
+            (0, NaluType::Slice)
+        } else {
+            (2, NaluType::Slice)
+        }
+    }
 }
 
 /// Wrapper type for [`BackendPromise<Output = R>`], with additional

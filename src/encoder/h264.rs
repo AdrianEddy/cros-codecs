@@ -30,7 +30,11 @@ pub struct EncoderConfig {
     /// (e.g. Vulkan Video via `vkGetEncodedVideoSessionParametersKHR`) sets
     /// this `false` so the predictor never duplicates them: `coded_output` then
     /// carries only the slice data the backend appends, and the backend prepends
-    /// the driver-authoritative headers at IDR.
+    /// the driver-authoritative headers where the request's `parameter_sets`
+    /// names them (an IDR, or the first frame after the PPS changed). The VA-API
+    /// backend decides it itself (`StatelessEncoder::new_vaapi`): `false` where the driver takes
+    /// packed headers (the driver writes the SPS and PPS the backend packs),
+    /// `true` where it does not.
     pub emit_parameter_sets: bool,
 }
 

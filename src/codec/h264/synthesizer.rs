@@ -9,11 +9,18 @@ use crate::codec::h264::nalu_writer::NaluWriterError;
 use crate::codec::h264::parser::HrdParams;
 use crate::codec::h264::parser::NaluType;
 use crate::codec::h264::parser::Pps;
+use crate::codec::h264::parser::RefPicListModification;
+use crate::codec::h264::parser::SliceHeader;
+use crate::codec::h264::parser::SliceType;
 use crate::codec::h264::parser::Sps;
 use crate::codec::h264::parser::DEFAULT_4X4_INTER;
 use crate::codec::h264::parser::DEFAULT_4X4_INTRA;
 use crate::codec::h264::parser::DEFAULT_8X8_INTER;
 use crate::codec::h264::parser::DEFAULT_8X8_INTRA;
+
+#[cfg(test)]
+#[path = "slice_header_synthesis_tests.rs"]
+mod slice_header_synthesis_tests;
 
 mod private {
     pub trait NaluStruct {}
@@ -23,9 +30,13 @@ impl private::NaluStruct for Sps {}
 
 impl private::NaluStruct for Pps {}
 
+impl private::NaluStruct for SliceHeader {}
+
 #[derive(Debug)]
 pub enum SynthesizerError {
     Unsupported,
+    /// The values given break a constraint of the specification; names which.
+    Invalid(&'static str),
     NaluWriter(NaluWriterError),
 }
 
@@ -33,6 +44,9 @@ impl fmt::Display for SynthesizerError {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
             SynthesizerError::Unsupported => write!(f, "tried to synthesize unsupported settings"),
+            SynthesizerError::Invalid(what) => {
+                write!(f, "tried to synthesize an invalid header: {what}")
+            }
             SynthesizerError::NaluWriter(x) => write!(f, "{}", x.to_string()),
         }
     }
@@ -442,6 +456,388 @@ impl<'n, W: Write> Synthesizer<'n, Pps, W> {
         self.se(self.nalu.second_chroma_qp_index_offset)?;
 
         Ok(())
+    }
+}
+
+impl<'n, W: Write> Synthesizer<'n, SliceHeader, W> {
+    /// Synthesizes a coded slice NAL unit up to its slice data: the 4-byte start code, the NAL
+    /// unit header (`nal_ref_idc`, `nalu_type`) and `slice_header()` (H.264 7.3.3), with
+    /// emulation prevention when `ep_enabled`. It is what an encoder hands the driver as a packed
+    /// slice header (`VAEncPackedHeaderSlice`), which the driver continues with the slice data.
+    ///
+    /// `slice_header()` ends where the slice data begins, mid-byte, so the last byte is completed
+    /// with zero bits; the function returns how many (0..=7). The packed header is
+    /// `8 * bytes - padding` bits long.
+    ///
+    /// `nalu_type` is [`NaluType::SliceIdr`] or [`NaluType::Slice`]; `sps` and `pps` are the
+    /// parameter sets the slice activates. `frame_num` and `pic_order_cnt_lsb` are written modulo
+    /// `MaxFrameNum` and `MaxPicOrderCntLsb`, the numbers the stream counts with. Where a slice
+    /// does not override them, the number of active references is the PPS's default.
+    pub fn synthesize(
+        nal_ref_idc: u8,
+        nalu_type: NaluType,
+        header: &'n SliceHeader,
+        sps: &Sps,
+        pps: &Pps,
+        writer: W,
+        ep_enabled: bool,
+    ) -> SynthesizerResult<u8> {
+        let idr = match nalu_type {
+            NaluType::SliceIdr => true,
+            NaluType::Slice => false,
+            _ => return Err(SynthesizerError::Unsupported),
+        };
+        if idr && nal_ref_idc == 0 {
+            return Err(SynthesizerError::Invalid("an IDR slice with nal_ref_idc 0 (7.4.1)"));
+        }
+        if nal_ref_idc > 3 {
+            return Err(SynthesizerError::Invalid("nal_ref_idc past its 2 bits"));
+        }
+        // `slice_group_change_cycle` needs the slice group map, which the PPS synthesizer refuses
+        // to write too.
+        if pps.num_slice_groups_minus1 > 0 {
+            return Err(SynthesizerError::Unsupported);
+        }
+
+        let mut s = Self { writer: NaluWriter::<W>::new(writer, ep_enabled), nalu: header };
+        s.check_ranges(sps, pps)?;
+        s.writer.write_header(nal_ref_idc, nalu_type as u8)?;
+        s.slice_header(idr, nal_ref_idc, sps, pps)?;
+        Ok(s.writer.flush_padded()?)
+    }
+
+    /// Refuses, before a bit is written, the values past the ranges the specification gives the
+    /// elements this header is sized, indexed or shifted by. Past them the header would not read
+    /// back as given (this crate's parser holds the same bounds), and `frame_num`'s and the POC
+    /// lsb's moduli, the `pred_weight_table()` lists and its default weights would overflow.
+    fn check_ranges(&self, sps: &Sps, pps: &Pps) -> SynthesizerResult<()> {
+        let h = self.nalu;
+        // 7.4.2.1.1: MaxFrameNum and MaxPicOrderCntLsb are at most 2^16.
+        if sps.log2_max_frame_num_minus4 > 12 {
+            return Err(SynthesizerError::Invalid("log2_max_frame_num_minus4 past 12 (7.4.2.1.1)"));
+        }
+        if sps.pic_order_cnt_type == 0 && sps.log2_max_pic_order_cnt_lsb_minus4 > 12 {
+            return Err(SynthesizerError::Invalid(
+                "log2_max_pic_order_cnt_lsb_minus4 past 12 (7.4.2.1.1)",
+            ));
+        }
+        // 7.4.3: a sequence of frames alone has no `field_pic_flag`, which then reads as 0.
+        if h.field_pic_flag && sps.frame_mbs_only_flag {
+            return Err(SynthesizerError::Invalid(
+                "a field slice in a frame-only sequence (7.4.3)",
+            ));
+        }
+        if !Self::is_inter(h.slice_type) {
+            return Ok(());
+        }
+        // 7.4.3: a list holds at most 16 references in a frame slice, 32 in a field slice. List 1
+        // is a B slice's alone.
+        let max_minus1 = if h.field_pic_flag { 31 } else { 15 };
+        let (l0_minus1, l1_minus1) = self.num_ref_idx_active_minus1(pps);
+        if l0_minus1 > max_minus1 || (h.slice_type.is_b() && l1_minus1 > max_minus1) {
+            return Err(SynthesizerError::Invalid(
+                "num_ref_idx_active_minus1 past 15 in a frame slice, 31 in a field slice (7.4.3)",
+            ));
+        }
+        // 7.4.3.2: the chroma denominator is written, and so bounded, where chroma is coded.
+        let pwt = &h.pred_weight_table;
+        if self.has_pred_weight_table(pps)
+            && (pwt.luma_log2_weight_denom > 7
+                || (sps.chroma_array_type() != 0 && pwt.chroma_log2_weight_denom > 7))
+        {
+            return Err(SynthesizerError::Invalid("log2_weight_denom past 7 (7.4.3.2)"));
+        }
+        Ok(())
+    }
+
+    /// P, SP and B slices predict from list 0.
+    fn is_inter(slice_type: SliceType) -> bool {
+        !(slice_type.is_i() || slice_type.is_si())
+    }
+
+    /// Whether the slice carries `pred_weight_table()`: explicit weighted prediction (7.3.3).
+    fn has_pred_weight_table(&self, pps: &Pps) -> bool {
+        let slice_type = self.nalu.slice_type;
+        (pps.weighted_pred_flag && (slice_type.is_p() || slice_type.is_sp()))
+            || (pps.weighted_bipred_idc == 1 && slice_type.is_b())
+    }
+
+    /// The reference indices a list holds for this slice: the slice's own count when it
+    /// overrides the PPS's, else the PPS's default.
+    fn num_ref_idx_active_minus1(&self, pps: &Pps) -> (u8, u8) {
+        let h = self.nalu;
+        if h.num_ref_idx_active_override_flag {
+            (h.num_ref_idx_l0_active_minus1, h.num_ref_idx_l1_active_minus1)
+        } else {
+            (pps.num_ref_idx_l0_default_active_minus1, pps.num_ref_idx_l1_default_active_minus1)
+        }
+    }
+
+    /// H.264 7.3.3.
+    fn slice_header(
+        &mut self,
+        idr: bool,
+        nal_ref_idc: u8,
+        sps: &Sps,
+        pps: &Pps,
+    ) -> SynthesizerResult<()> {
+        let h = self.nalu;
+        let slice_type = h.slice_type;
+        let inter = Self::is_inter(slice_type);
+
+        self.ue(h.first_mb_in_slice)?;
+        self.ue(slice_type as u8)?;
+        self.ue(h.pic_parameter_set_id)?;
+        if sps.separate_colour_plane_flag {
+            self.u(2, h.colour_plane_id)?;
+        }
+
+        let frame_num_bits = usize::from(sps.log2_max_frame_num_minus4) + 4;
+        self.u(frame_num_bits, u32::from(h.frame_num) & (sps.max_frame_num() - 1))?;
+
+        if !sps.frame_mbs_only_flag {
+            self.u(1, h.field_pic_flag)?;
+            if h.field_pic_flag {
+                self.u(1, h.bottom_field_flag)?;
+            }
+        }
+
+        if idr {
+            self.ue(h.idr_pic_id)?;
+        }
+
+        let bottom_delta = pps.bottom_field_pic_order_in_frame_present_flag && !h.field_pic_flag;
+        if sps.pic_order_cnt_type == 0 {
+            let lsb_bits = usize::from(sps.log2_max_pic_order_cnt_lsb_minus4) + 4;
+            self.u(lsb_bits, u32::from(h.pic_order_cnt_lsb) & ((1u32 << lsb_bits) - 1))?;
+            if bottom_delta {
+                self.se(h.delta_pic_order_cnt_bottom)?;
+            }
+        }
+        if sps.pic_order_cnt_type == 1 && !sps.delta_pic_order_always_zero_flag {
+            self.se(h.delta_pic_order_cnt[0])?;
+            if bottom_delta {
+                self.se(h.delta_pic_order_cnt[1])?;
+            }
+        }
+
+        if pps.redundant_pic_cnt_present_flag {
+            self.ue(h.redundant_pic_cnt)?;
+        }
+
+        if slice_type.is_b() {
+            self.u(1, h.direct_spatial_mv_pred_flag)?;
+        }
+
+        if inter {
+            self.u(1, h.num_ref_idx_active_override_flag)?;
+            if h.num_ref_idx_active_override_flag {
+                self.ue(h.num_ref_idx_l0_active_minus1)?;
+                if slice_type.is_b() {
+                    self.ue(h.num_ref_idx_l1_active_minus1)?;
+                }
+            }
+        }
+
+        // ref_pic_list_modification() (7.3.3.1); `nalu_type` is never 20 or 21 here, so
+        // never the MVC form.
+        if inter {
+            self.ref_pic_list_modification(
+                h.ref_pic_list_modification_flag_l0,
+                &h.ref_pic_list_modification_l0,
+            )?;
+        }
+        if slice_type.is_b() {
+            self.ref_pic_list_modification(
+                h.ref_pic_list_modification_flag_l1,
+                &h.ref_pic_list_modification_l1,
+            )?;
+        }
+
+        if self.has_pred_weight_table(pps) {
+            self.pred_weight_table(sps, pps)?;
+        }
+
+        if nal_ref_idc != 0 {
+            self.dec_ref_pic_marking(idr)?;
+        }
+
+        if pps.entropy_coding_mode_flag && inter {
+            self.ue(h.cabac_init_idc)?;
+        }
+
+        self.se(h.slice_qp_delta)?;
+
+        if slice_type.is_sp() || slice_type.is_si() {
+            if slice_type.is_sp() {
+                self.u(1, h.sp_for_switch_flag)?;
+            }
+            self.se(h.slice_qs_delta)?;
+        }
+
+        if pps.deblocking_filter_control_present_flag {
+            self.ue(h.disable_deblocking_filter_idc)?;
+            if h.disable_deblocking_filter_idc != 1 {
+                self.se(h.slice_alpha_c0_offset_div2)?;
+                self.se(h.slice_beta_offset_div2)?;
+            }
+        }
+
+        Ok(())
+    }
+
+    /// One list's half of `ref_pic_list_modification()` (7.3.3.1). `ops` may or may not hold the
+    /// closing `modification_of_pic_nums_idc` 3 (the parser keeps it); the list is closed once.
+    fn ref_pic_list_modification(
+        &mut self,
+        flag: bool,
+        ops: &[RefPicListModification],
+    ) -> SynthesizerResult<()> {
+        self.u(1, flag)?;
+        if !flag {
+            return Ok(());
+        }
+        for op in ops {
+            match op.modification_of_pic_nums_idc {
+                0 | 1 => {
+                    self.ue(op.modification_of_pic_nums_idc)?;
+                    self.ue(op.abs_diff_pic_num_minus1)?;
+                }
+                2 => {
+                    self.ue(2u32)?;
+                    self.ue(op.long_term_pic_num)?;
+                }
+                3 => break,
+                // 4 and 5 are the MVC form, which a slice of nal_unit_type 1 or 5 cannot carry.
+                _ => return Err(SynthesizerError::Invalid("modification_of_pic_nums_idc past 3")),
+            }
+        }
+        self.ue(3u32)
+    }
+
+    /// `pred_weight_table()` (7.3.3.2). A weight flag is set where the entry differs from the
+    /// value the flag's absence infers (weight `2^denom`, offset 0), so the table decodes to the
+    /// values held. [`Self::check_ranges`] has bounded the list lengths and the denominators.
+    fn pred_weight_table(&mut self, sps: &Sps, pps: &Pps) -> SynthesizerResult<()> {
+        let h = self.nalu;
+        let pwt = &h.pred_weight_table;
+        let (l0_minus1, l1_minus1) = self.num_ref_idx_active_minus1(pps);
+
+        self.ue(pwt.luma_log2_weight_denom)?;
+        let luma_default = 1i32 << pwt.luma_log2_weight_denom;
+        // The chroma weights, and their denominator, are coded where chroma is.
+        let chroma_default =
+            (sps.chroma_array_type() != 0).then(|| 1i32 << pwt.chroma_log2_weight_denom);
+        if chroma_default.is_some() {
+            self.ue(pwt.chroma_log2_weight_denom)?;
+        }
+
+        for i in 0..=usize::from(l0_minus1) {
+            let (weight, offset) =
+                (i32::from(pwt.luma_weight_l0[i]), i32::from(pwt.luma_offset_l0[i]));
+            self.weight(weight, offset, luma_default)?;
+            if let Some(chroma_default) = chroma_default {
+                let w = pwt.chroma_weight_l0[i].map(i32::from);
+                let o = pwt.chroma_offset_l0[i].map(i32::from);
+                self.chroma_weights(w, o, chroma_default)?;
+            }
+        }
+        if h.slice_type.is_b() {
+            for i in 0..=usize::from(l1_minus1) {
+                let (weight, offset) =
+                    (i32::from(pwt.luma_weight_l1[i]), i32::from(pwt.luma_offset_l1[i]));
+                self.weight(weight, offset, luma_default)?;
+                if let Some(chroma_default) = chroma_default {
+                    let w = pwt.chroma_weight_l1[i].map(i32::from);
+                    let o = pwt.chroma_offset_l1[i].map(i32::from);
+                    self.chroma_weights(w, o, chroma_default)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// 7.4.3.2: a weight and an offset the table states are in -128..=127. (An inferred weight
+    /// may be 128, `2^7`, which is why it is inferred.)
+    fn check_explicit_weight(weight: i32, offset: i32) -> SynthesizerResult<()> {
+        const RANGE: std::ops::RangeInclusive<i32> = -128..=127;
+        if RANGE.contains(&weight) && RANGE.contains(&offset) {
+            Ok(())
+        } else {
+            Err(SynthesizerError::Invalid("an explicit weight or offset past -128..=127 (7.4.3.2)"))
+        }
+    }
+
+    /// One `luma_weight_lX_flag` and, when set, its weight and offset.
+    fn weight(&mut self, weight: i32, offset: i32, default: i32) -> SynthesizerResult<()> {
+        let explicit = weight != default || offset != 0;
+        self.u(1, explicit)?;
+        if explicit {
+            Self::check_explicit_weight(weight, offset)?;
+            self.se(weight)?;
+            self.se(offset)?;
+        }
+        Ok(())
+    }
+
+    /// One `chroma_weight_lX_flag` and, when set, both components' weights and offsets.
+    fn chroma_weights(
+        &mut self,
+        weight: [i32; 2],
+        offset: [i32; 2],
+        default: i32,
+    ) -> SynthesizerResult<()> {
+        let explicit = weight.iter().any(|w| *w != default) || offset.iter().any(|o| *o != 0);
+        self.u(1, explicit)?;
+        if explicit {
+            for j in 0..2 {
+                Self::check_explicit_weight(weight[j], offset[j])?;
+                self.se(weight[j])?;
+                self.se(offset[j])?;
+            }
+        }
+        Ok(())
+    }
+
+    /// `dec_ref_pic_marking()` (7.3.3.3).
+    fn dec_ref_pic_marking(&mut self, idr: bool) -> SynthesizerResult<()> {
+        let marking = &self.nalu.dec_ref_pic_marking;
+        if idr {
+            self.u(1, marking.no_output_of_prior_pics_flag)?;
+            self.u(1, marking.long_term_reference_flag)?;
+            return Ok(());
+        }
+        self.u(1, marking.adaptive_ref_pic_marking_mode_flag)?;
+        if !marking.adaptive_ref_pic_marking_mode_flag {
+            return Ok(());
+        }
+        for op in &marking.inner {
+            let mmco = op.memory_management_control_operation;
+            match mmco {
+                // 0 ends the list, which is closed once below.
+                0 => break,
+                1..=6 => {}
+                _ => {
+                    return Err(SynthesizerError::Invalid(
+                        "memory_management_control_operation past 6",
+                    ))
+                }
+            }
+            self.ue(mmco)?;
+            if mmco == 1 || mmco == 3 {
+                self.ue(op.difference_of_pic_nums_minus1)?;
+            }
+            if mmco == 2 {
+                self.ue(op.long_term_pic_num)?;
+            }
+            if mmco == 3 || mmco == 6 {
+                self.ue(op.long_term_frame_idx)?;
+            }
+            if mmco == 4 {
+                self.ue(op.max_long_term_frame_idx.to_value_plus1())?;
+            }
+        }
+        self.ue(0u32)
     }
 }
 

@@ -7,13 +7,18 @@ use std::marker::PhantomData;
 use std::rc::Rc;
 
 use anyhow::anyhow;
+use libva::BorrowedBufferType;
+use libva::BufferType;
 use libva::Config;
 use libva::Context;
 use libva::Display;
 use libva::EncCodedBuffer;
+use libva::EncPackedHeaderParameter;
+use libva::EncPackedHeaderType;
 use libva::MappedCodedBuffer;
 use libva::Picture;
 use libva::PictureEnd;
+use libva::PictureNew;
 use libva::Surface;
 use libva::SurfaceMemoryDescriptor;
 use libva::UsageHint;
@@ -94,6 +99,49 @@ pub(crate) fn vbr_target_percentage(avg_bitrate: u64, max_bitrate: u64) -> u32 {
         return 100;
     }
     (avg_bitrate.saturating_mul(100) / max_bitrate).clamp(1, 100) as u32
+}
+
+/// The all-three-or-none packed-header decision. Given the queried
+/// `VAConfigAttribEncPackedHeaders` value, returns the mask of headers the
+/// application must supply: the full `SEQUENCE | PICTURE | SLICE` set when the
+/// driver advertises all three, or `0` (`VA_ENC_PACKED_HEADER_NONE`) when
+/// the attribute is unsupported or only partially advertised. Both the H.264
+/// and the HEVC backend take it, as Chromium's VA-API encoders do: a driver
+/// that parses a packed slice header reads the parameter sets it needs for that
+/// from the packed ones (radeonsi takes H.264's `entropy_coding_mode_flag` from
+/// the packed PPS alone), so a slice header packed beside driver-written
+/// parameter sets is a combination nothing pins. Pure — unit tested without a
+/// driver.
+pub(crate) fn decide_packed_headers(attrib_value: u32) -> u32 {
+    const NEED: u32 = libva::VA_ENC_PACKED_HEADER_SEQUENCE
+        | libva::VA_ENC_PACKED_HEADER_PICTURE
+        | libva::VA_ENC_PACKED_HEADER_SLICE;
+    if attrib_value == libva::VA_ATTRIB_NOT_SUPPORTED {
+        return libva::VA_ENC_PACKED_HEADER_NONE;
+    }
+    if attrib_value & NEED == NEED {
+        NEED
+    } else {
+        libva::VA_ENC_PACKED_HEADER_NONE
+    }
+}
+
+/// Query the driver's packed-header support for `profile`/`entrypoint` and apply
+/// [`decide_packed_headers`]. A query failure is treated as "self-generating"
+/// (`0`) for drivers that generate the headers themselves.
+pub(crate) fn query_packed_headers(
+    display: &Display,
+    profile: VAProfile::Type,
+    entrypoint: libva::VAEntrypoint::Type,
+) -> u32 {
+    let mut attrs = [libva::VAConfigAttrib {
+        type_: libva::VAConfigAttribType::VAConfigAttribEncPackedHeaders,
+        value: 0,
+    }];
+    match display.get_config_attributes(profile, entrypoint, &mut attrs) {
+        Ok(()) => decide_packed_headers(attrs[0].value),
+        Err(_) => libva::VA_ENC_PACKED_HEADER_NONE,
+    }
 }
 
 pub(crate) fn tunings_to_libva_rc<const CLAMP_MIN_QP: u32, const CLAMP_MAX_QP: u32>(
@@ -227,8 +275,12 @@ where
     /// The mask of application-packed header types the driver expects
     /// (`VA_ENC_PACKED_HEADER_*`). `0` (`VA_ENC_PACKED_HEADER_NONE`) means the
     /// driver self-generates them; a non-zero value means the codec backend must submit the packed
-    /// VPS/SPS/PPS(/slice). See [`crate::encoder::stateless::h265::vaapi`].
+    /// parameter sets (and slice header). See [`crate::encoder::stateless::h264::vaapi`] and
+    /// [`crate::encoder::stateless::h265::vaapi`].
     packed_headers: u32,
+    /// Where [`Self::add_packed_header`] synthesizes each packed header. `vaCreateBuffer` copies
+    /// it, so one buffer serves every header and steady-state encoding allocates none for them.
+    packed_header: Vec<u8>,
     scratch_pool: VaSurfacePool<()>,
     _phantom: PhantomData<(M, H)>,
 }
@@ -261,8 +313,13 @@ where
 
     /// [`Self::new`] plus the `VAConfigAttribEncPackedHeaders` value the codec
     /// needs. When `packed_headers != 0` the config advertises it so the driver
-    /// accepts the application-packed VPS/SPS/PPS(/slice) buffers;
+    /// accepts the application-packed parameter sets (and slice header);
     /// `0` leaves the attribute off (the driver self-generates).
+    ///
+    /// With packed headers the driver writes the whole access unit, parameter sets
+    /// included, so an H.264 encoder over this backend clears
+    /// [`EncoderConfig::emit_parameter_sets`](crate::encoder::h264::EncoderConfig::emit_parameter_sets),
+    /// as `StatelessEncoder::new_vaapi` does.
     pub fn new_with_packed_headers(
         display: Rc<Display>,
         va_profile: VAProfile::Type,
@@ -326,20 +383,52 @@ where
             scratch_pool,
             coded_size,
             packed_headers,
+            packed_header: Vec::new(),
             _va_profile: va_profile,
             _phantom: Default::default(),
         })
     }
 
     /// The mask of application-packed header types the driver expects (see the
-    /// [`Self::packed_headers`] field). Read by the HEVC backend to decide which
-    /// packed headers to synthesise.
+    /// [`Self::packed_headers`] field). Both the H.264 and the HEVC backend read it
+    /// to decide which packed headers to synthesise.
     pub(crate) fn packed_headers(&self) -> u32 {
         self.packed_headers
     }
 
     pub(crate) fn context(&self) -> &Rc<Context> {
         &self.context
+    }
+
+    /// Synthesize an application-packed header and queue it on `picture`: the
+    /// `VAEncPackedHeaderParameterBuffer` + `VAEncPackedHeaderDataBuffer` pair.
+    /// `synthesize` writes one complete Annex-B NAL unit (start code included)
+    /// with its emulation-prevention bytes in (`has_emulation_bytes`) and returns
+    /// the zero bits that complete its last byte: none for a NAL that ends
+    /// byte-aligned, some for one that ends mid-byte (an H.264 slice header, which
+    /// the driver continues with the slice data from the last bit stated). It
+    /// writes into the backend's [`Self::packed_header`] buffer, which
+    /// `vaCreateBuffer` copies.
+    pub(crate) fn add_packed_header<P, E: std::fmt::Display>(
+        &mut self,
+        picture: &mut Picture<PictureNew, P>,
+        header_type: EncPackedHeaderType,
+        synthesize: impl FnOnce(&mut Vec<u8>) -> Result<u8, E>,
+    ) -> StatelessBackendResult<()> {
+        let data = &mut self.packed_header;
+        data.clear();
+        let padding = synthesize(data)
+            .map_err(|e| StatelessBackendError::Other(anyhow!("packed header: {e}")))?;
+        let bit_length = (data.len() * 8) as u32 - u32::from(padding);
+        let param = BufferType::EncPackedHeaderParameter(EncPackedHeaderParameter::new(
+            header_type,
+            bit_length,
+            /* has_emulation */ true,
+        ));
+        picture.add_buffer(self.context.create_buffer(param)?);
+        let payload = BorrowedBufferType::EncPackedHeaderData(data.as_slice());
+        picture.add_buffer(self.context.create_buffer_borrowed(payload)?);
+        Ok(())
     }
 
     pub(crate) fn new_coded_buffer(

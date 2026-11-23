@@ -526,6 +526,12 @@ impl<W: Write> BitWriter<W> {
         self.nth_bit != 0
     }
 
+    /// The zero bits [`Self::flush`] would add to complete the current byte: 0 when the bits
+    /// written so far end on a byte boundary.
+    pub fn padding_to_byte(&self) -> u8 {
+        (8 - self.nth_bit) % 8
+    }
+
     pub(crate) fn inner(&self) -> &W {
         &self.out
     }

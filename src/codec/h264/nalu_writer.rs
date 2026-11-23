@@ -224,6 +224,17 @@ impl<W: Write> NaluWriter<W> {
     pub fn aligned(&self) -> bool {
         !self.0.has_data_pending()
     }
+
+    /// Completes the last byte with zero bits, outputs every byte still held back, and returns
+    /// how many zero bits completed it (0 when the bits written ended on a byte boundary).
+    ///
+    /// A syntax structure that ends mid-byte, such as an H.264 `slice_header()` (the slice data
+    /// continues it), is therefore `8 * bytes - padding` bits long.
+    pub fn flush_padded(&mut self) -> NaluWriterResult<u8> {
+        let padding = self.0.padding_to_byte();
+        self.0.flush()?;
+        Ok(padding)
+    }
 }
 
 #[cfg(test)]

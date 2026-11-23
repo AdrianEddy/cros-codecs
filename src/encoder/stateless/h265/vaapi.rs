@@ -13,7 +13,8 @@
 //! others self-generate them and advertise `VAConfigAttribEncPackedHeaders` as
 //! `VA_ATTRIB_NOT_SUPPORTED`. At construction, [`query_packed_headers`] reads
 //! the attribute and applies an all-three-or-none rule
-//! ([`decide_packed_headers`]): if the driver advertises
+//! ([`decide_packed_headers`](crate::backend::vaapi::encoder::decide_packed_headers)), the
+//! H.264 backend's too: if the driver advertises
 //! all of SEQUENCE | PICTURE | SLICE, the backend packs all of them (VPS + SPS on
 //! IDR, PPS every frame, and a slice header every frame) with the synthesizer;
 //! otherwise it packs nothing and the driver self-generates. Either way the coded
@@ -28,12 +29,10 @@ use std::any::Any;
 use std::borrow::Borrow;
 use std::rc::Rc;
 
-use anyhow::anyhow;
 use anyhow::Context;
 use libva::BufferType;
 use libva::Display;
 use libva::EncCodedBuffer;
-use libva::EncPackedHeaderParameter;
 use libva::EncPackedHeaderType;
 use libva::EncPictureParameter;
 use libva::EncPictureParameterBufferHEVC;
@@ -56,6 +55,7 @@ use libva::VAProfile;
 use libva::VA_INVALID_ID;
 use libva::VA_PICTURE_HEVC_INVALID;
 
+use crate::backend::vaapi::encoder::query_packed_headers;
 use crate::backend::vaapi::encoder::rate_control_to_va_rc;
 use crate::backend::vaapi::encoder::tunings_to_libva_rc;
 use crate::backend::vaapi::encoder::CodedOutputPromise;
@@ -68,7 +68,6 @@ use crate::codec::h265::parser::SliceType;
 use crate::codec::h265::parser::Sps;
 use crate::codec::h265::parser::Vps;
 use crate::codec::h265::synthesizer::Synthesizer;
-use crate::codec::h265::synthesizer::SynthesizerResult;
 use crate::encoder::h265::EncoderConfig;
 use crate::encoder::h265::H265;
 use crate::encoder::stateless::h265::predictor::MAX_QP;
@@ -107,44 +106,6 @@ pub(crate) fn coding_type_for_slice(slice_type: SliceType) -> u32 {
 /// `collocated_ref_pic_index` sentinel when `slice_temporal_mvp_enabled_flag == 0`
 /// Temporal MVP is disabled, so there is no collocated picture.
 const COLLOCATED_REF_PIC_NONE: u8 = 0xFF;
-
-/// The all-three-or-none packed-header decision. Given the queried
-/// `VAConfigAttribEncPackedHeaders` value, returns the mask of headers the
-/// application must supply: the full `SEQUENCE | PICTURE | SLICE` set when the
-/// driver advertises all three, or `0` (`VA_ENC_PACKED_HEADER_NONE`) when
-/// the attribute is unsupported or only partially
-/// advertised. Pure — unit tested without a driver.
-pub(crate) fn decide_packed_headers(attrib_value: u32) -> u32 {
-    const NEED: u32 = libva::VA_ENC_PACKED_HEADER_SEQUENCE
-        | libva::VA_ENC_PACKED_HEADER_PICTURE
-        | libva::VA_ENC_PACKED_HEADER_SLICE;
-    if attrib_value == libva::VA_ATTRIB_NOT_SUPPORTED {
-        return libva::VA_ENC_PACKED_HEADER_NONE;
-    }
-    if attrib_value & NEED == NEED {
-        NEED
-    } else {
-        libva::VA_ENC_PACKED_HEADER_NONE
-    }
-}
-
-/// Query the driver's packed-header support for `profile`/`entrypoint` and apply
-/// [`decide_packed_headers`]. A query failure is treated as "self-generating"
-/// (`0`) for drivers that generate the headers themselves.
-fn query_packed_headers(
-    display: &Display,
-    profile: VAProfile::Type,
-    entrypoint: libva::VAEntrypoint::Type,
-) -> u32 {
-    let mut attrs = [libva::VAConfigAttrib {
-        type_: libva::VAConfigAttribType::VAConfigAttribEncPackedHeaders,
-        value: 0,
-    }];
-    match display.get_config_attributes(profile, entrypoint, &mut attrs) {
-        Ok(()) => decide_packed_headers(attrs[0].value),
-        Err(_) => libva::VA_ENC_PACKED_HEADER_NONE,
-    }
-}
 
 /// An invalid [`PictureHEVC`] used to fill the unused reference-list slots.
 fn invalid_hevc_pic() -> PictureHEVC {
@@ -360,14 +321,6 @@ fn build_enc_slice_param(
     )))
 }
 
-/// Run a synthesizer closure into a fresh byte buffer, mapping its error into a
-/// backend error.
-fn synth(f: impl FnOnce(&mut Vec<u8>) -> SynthesizerResult<()>) -> StatelessBackendResult<Vec<u8>> {
-    let mut buf = Vec::new();
-    f(&mut buf).map_err(|e| StatelessBackendError::Other(anyhow!("hevc packed header: {e}")))?;
-    Ok(buf)
-}
-
 impl<M, H> StatelessVideoEncoderBackend<H265> for VaapiBackend<M, H>
 where
     M: SurfaceMemoryDescriptor,
@@ -377,34 +330,6 @@ where
     type Reconstructed = Reconstructed;
     type CodedPromise = CodedOutputPromise<M, H>;
     type ReconPromise = ReadyPromise<Self::Reconstructed>;
-}
-
-impl<M, H> VaapiBackend<M, H>
-where
-    M: SurfaceMemoryDescriptor,
-    H: std::borrow::Borrow<Surface<M>> + 'static,
-{
-    /// Synthesise a NAL into an application-packed header and queue the
-    /// `VAEncPackedHeaderParameterBuffer` + `VAEncPackedHeaderDataBuffer` pair on
-    /// `picture`. The synthesizer emits a complete, byte-aligned Annex-B NAL with
-    /// emulation-prevention on, so `bit_length == bytes * 8` and
-    /// `has_emulation_bytes == true`.
-    fn add_packed_header(
-        &self,
-        picture: &mut Picture<libva::PictureNew, H>,
-        header_type: EncPackedHeaderType,
-        data: Vec<u8>,
-    ) -> StatelessBackendResult<()> {
-        let bit_length = (data.len() * 8) as u32;
-        let param = BufferType::EncPackedHeaderParameter(EncPackedHeaderParameter::new(
-            header_type,
-            bit_length,
-            /* has_emulation */ true,
-        ));
-        picture.add_buffer(self.context().create_buffer(param)?);
-        picture.add_buffer(self.context().create_buffer(BufferType::EncPackedHeaderData(data))?);
-        Ok(())
-    }
 }
 
 impl<M, H> StatelessH265EncoderBackend for VaapiBackend<M, H>
@@ -464,22 +389,26 @@ where
         // parameter buffer. When the driver self-generates (`packed_headers == 0`),
         // nothing is packed.
         let packed = self.packed_headers();
+        // Every NAL the HEVC synthesizer writes ends byte-aligned (`slice_segment_header()`
+        // with its `byte_alignment()`), so none leaves bits of its last byte to the driver.
         if packed != 0 {
             if request.is_idr {
-                let vps = synth(|w| Synthesizer::<Vps, _>::synthesize(request.vps.as_ref(), w, true))?;
-                self.add_packed_header(&mut picture, EncPackedHeaderType::Sequence, vps)?;
-
-                let sps = synth(|w| Synthesizer::<Sps, _>::synthesize(request.sps.as_ref(), w, true))?;
-                self.add_packed_header(&mut picture, EncPackedHeaderType::Sequence, sps)?;
+                self.add_packed_header(&mut picture, EncPackedHeaderType::Sequence, |w| {
+                    Synthesizer::<Vps, _>::synthesize(request.vps.as_ref(), w, true).map(|()| 0)
+                })?;
+                self.add_packed_header(&mut picture, EncPackedHeaderType::Sequence, |w| {
+                    Synthesizer::<Sps, _>::synthesize(request.sps.as_ref(), w, true).map(|()| 0)
+                })?;
             }
-            let pps = synth(|w| Synthesizer::<Pps, _>::synthesize(request.pps.as_ref(), w, true))?;
-            self.add_packed_header(&mut picture, EncPackedHeaderType::Picture, pps)?;
+            self.add_packed_header(&mut picture, EncPackedHeaderType::Picture, |w| {
+                Synthesizer::<Pps, _>::synthesize(request.pps.as_ref(), w, true).map(|()| 0)
+            })?;
         }
 
         picture.add_buffer(self.context().create_buffer(pic_param)?);
 
         if packed != 0 {
-            let slice_hdr = synth(|w| {
+            self.add_packed_header(&mut picture, EncPackedHeaderType::Slice, |w| {
                 Synthesizer::<SliceHeader, _>::synthesize(
                     request.nalu_type,
                     &request.header,
@@ -488,8 +417,8 @@ where
                     w,
                     true,
                 )
+                .map(|()| 0)
             })?;
-            self.add_packed_header(&mut picture, EncPackedHeaderType::Slice, slice_hdr)?;
         }
 
         picture.add_buffer(self.context().create_buffer(slice_param)?);

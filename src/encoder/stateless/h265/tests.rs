@@ -30,7 +30,7 @@ use crate::encoder::stateless::h265::predictor::LowDelayH265;
 #[cfg(feature = "vaapi")]
 use crate::encoder::stateless::h265::vaapi::coding_type_for_slice;
 #[cfg(feature = "vaapi")]
-use crate::encoder::stateless::h265::vaapi::decide_packed_headers;
+use crate::backend::vaapi::encoder::decide_packed_headers;
 use crate::encoder::stateless::h265::DpbEntry;
 use crate::encoder::stateless::h265::DpbEntryMeta;
 use crate::encoder::stateless::predictor::LowDelayDelegate;

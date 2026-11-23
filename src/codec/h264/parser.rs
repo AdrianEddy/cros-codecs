@@ -849,6 +849,11 @@ impl Sps {
         1 << (self.log2_max_frame_num_minus4 + 4)
     }
 
+    /// Same as MaxPicOrderCntLsb. See 7-11 in the specification.
+    pub fn max_pic_order_cnt_lsb(&self) -> u32 {
+        1 << (self.log2_max_pic_order_cnt_lsb_minus4 + 4)
+    }
+
     pub fn visible_rectangle(&self) -> Rect<u32> {
         if !self.frame_cropping_flag {
             return Rect {
@@ -995,6 +1000,12 @@ impl Default for Sps {
             vui_parameters: Default::default(),
         }
     }
+}
+
+/// `floor(log2(value)) - 4`, clamped to the 0..=12 that `log2_max_frame_num_minus4` and
+/// `log2_max_pic_order_cnt_lsb_minus4` may hold.
+fn log2_minus4_in_range(value: u32) -> u8 {
+    (value.clamp(1 << 4, 1 << 16).ilog2() - 4) as u8
 }
 
 #[derive(Default)]
@@ -1191,8 +1202,11 @@ impl SpsBuilder {
         self
     }
 
+    /// `MaxFrameNum` as the largest power of two not above `value`, within the 2^4..=2^16 the
+    /// specification allows (7.4.2.1.1): a smaller `value` (an encoder's GOP of a few frames)
+    /// takes 16, a larger one 65536.
     pub fn max_frame_num(self, value: u32) -> Self {
-        self.log2_max_frame_num_minus4(value.ilog2() as u8 - 4u8)
+        self.log2_max_frame_num_minus4(log2_minus4_in_range(value))
     }
 
     pub fn pic_order_cnt_type(mut self, value: u8) -> Self {
@@ -1205,8 +1219,10 @@ impl SpsBuilder {
         self
     }
 
+    /// `MaxPicOrderCntLsb` as the largest power of two not above `value`, within the
+    /// 2^4..=2^16 the specification allows (7.4.2.1.1).
     pub fn max_pic_order_cnt_lsb(self, value: u32) -> Self {
-        self.log2_max_pic_order_cnt_lsb_minus4(value.ilog2() as u8 - 4u8)
+        self.log2_max_pic_order_cnt_lsb_minus4(log2_minus4_in_range(value))
     }
 
     pub fn delta_pic_order_always_zero_flag(mut self, value: bool) -> Self {

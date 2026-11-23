@@ -2,6 +2,34 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+//! VA-API stateless H.264 encoder backend.
+//!
+//! ## Packed headers
+//!
+//! A driver that advertises `VA_ENC_PACKED_HEADER_SLICE` (and the sequence and picture
+//! headers) through `VAConfigAttribEncPackedHeaders` expects the application to supply them
+//! (`va.h`: "Application must provide it to driver once this flag is returned"), and writes
+//! what it is given. Mesa's radeonsi, for one, builds every slice NAL unit from the packed slice
+//! header it parsed: `nal_ref_idc`, `nal_unit_type`, `frame_num`, `idr_pic_id` and the POC lsb
+//! all come from it, so without one each slice starts with the header byte `0x00`. It reads
+//! `entropy_coding_mode_flag` from the packed PPS to parse that slice header, too.
+//!
+//! So this backend takes the HEVC backend's all-three-or-none rule
+//! ([`decide_packed_headers`](crate::backend::vaapi::encoder::decide_packed_headers)), as
+//! Chromium's VA-API H.264 encoder does: where the driver advertises SEQUENCE, PICTURE and
+//! SLICE, the IDR packs the SPS (beside the sequence parameter buffer) and the PPS, the first
+//! frame after the PPS changed packs the PPS
+//! ([`ParameterSets`](crate::encoder::stateless::h264::ParameterSets)), and every frame packs
+//! its slice header, NAL unit header included. The coded buffer then holds the whole access
+//! unit and the predictor writes no parameter set of its own (`emit_parameter_sets` is
+//! cleared). Elsewhere the driver writes the slice headers and the predictor the parameter
+//! sets, in band.
+//!
+//! The buffers go in FFmpeg's order (`vaapi_encode.c`): the sequence and picture parameters,
+//! the rate control, the packed SPS and PPS, then the slice's packed header and its slice
+//! parameters. A driver that parses the packed slice header (radeonsi) needs the picture
+//! parameters (whether the picture is an IDR) and the PPS before it.
+
 use std::any::Any;
 use std::borrow::Borrow;
 use std::rc::Rc;
@@ -10,6 +38,7 @@ use anyhow::Context;
 use libva::BufferType;
 use libva::Display;
 use libva::EncCodedBuffer;
+use libva::EncPackedHeaderType;
 use libva::EncPictureParameter;
 use libva::EncPictureParameterBufferH264;
 use libva::EncSequenceParameter;
@@ -24,11 +53,14 @@ use libva::Picture;
 use libva::PictureH264;
 use libva::Surface;
 use libva::SurfaceMemoryDescriptor;
+use libva::VAEntrypoint::VAEntrypointEncSlice;
+use libva::VAEntrypoint::VAEntrypointEncSliceLP;
 use libva::VAProfile;
 use libva::VA_INVALID_ID;
 use libva::VA_PICTURE_H264_LONG_TERM_REFERENCE;
 use libva::VA_PICTURE_H264_SHORT_TERM_REFERENCE;
 
+use crate::backend::vaapi::encoder::query_packed_headers;
 use crate::backend::vaapi::encoder::rate_control_to_va_rc;
 use crate::backend::vaapi::encoder::tunings_to_libva_rc;
 use crate::backend::vaapi::encoder::CodedOutputPromise;
@@ -38,6 +70,7 @@ use crate::codec::h264::parser::Pps;
 use crate::codec::h264::parser::Profile;
 use crate::codec::h264::parser::SliceHeader;
 use crate::codec::h264::parser::Sps;
+use crate::codec::h264::synthesizer::Synthesizer;
 use crate::encoder::h264::EncoderConfig;
 use crate::encoder::h264::H264;
 use crate::encoder::stateless::h264::predictor::MAX_QP;
@@ -95,13 +128,7 @@ where
             IsReference::ShortTerm => VA_PICTURE_H264_SHORT_TERM_REFERENCE,
         };
 
-        PictureH264::new(
-            surface.surface_id(),
-            meta.frame_num,
-            flags,
-            meta.poc as i32,
-            meta.poc as i32,
-        )
+        PictureH264::new(surface.surface_id(), meta.frame_num, flags, meta.poc, meta.poc)
     }
 
     /// Builds [`BufferType::EncSequenceParameter`] from `sps`
@@ -208,11 +235,8 @@ where
 
         assert!(request.ref_list_0.len() + request.ref_list_1.len() <= 16);
 
-        let mut reference_frames: [PictureH264; 16] = (0..16)
-            .map(|_| Self::build_invalid_va_h264_pic_enc())
-            .collect::<Vec<_>>()
-            .try_into()
-            .unwrap_or_else(|_| panic!());
+        let mut reference_frames: [PictureH264; 16] =
+            std::array::from_fn(|_| Self::build_invalid_va_h264_pic_enc());
 
         for (idx, ref_frame) in
             request.ref_list_0.iter().chain(request.ref_list_1.iter()).enumerate().take(16)
@@ -228,6 +252,7 @@ where
                 request.pps.pic_parameter_set_id,
                 request.pps.seq_parameter_set_id,
                 0, // last_pic, don't appned EOS
+                // The `frame_num` syntax element, which `DpbEntryMeta::frame_num` is.
                 request.dpb_meta.frame_num as u16,
                 (request.pps.pic_init_qp_minus26 + 26) as u8,
                 request.pps.num_ref_idx_l0_default_active_minus1,
@@ -247,21 +272,15 @@ where
         ref_list_1: &[Rc<DpbEntry<Reconstructed>>],
         num_macroblocks: u32,
     ) -> BufferType {
-        let mut ref_pic_list_0: [PictureH264; 32] = (0..32)
-            .map(|_| Self::build_invalid_va_h264_pic_enc())
-            .collect::<Vec<_>>()
-            .try_into()
-            .unwrap_or_else(|_| panic!());
+        let mut ref_pic_list_0: [PictureH264; 32] =
+            std::array::from_fn(|_| Self::build_invalid_va_h264_pic_enc());
 
         for (idx, ref_frame) in ref_list_0.iter().enumerate().take(16) {
             ref_pic_list_0[idx] = Self::build_h264_pic(&ref_frame.recon_pic, &ref_frame.meta);
         }
 
-        let mut ref_pic_list_1: [PictureH264; 32] = (0..32)
-            .map(|_| Self::build_invalid_va_h264_pic_enc())
-            .collect::<Vec<_>>()
-            .try_into()
-            .unwrap_or_else(|_| panic!());
+        let mut ref_pic_list_1: [PictureH264; 32] =
+            std::array::from_fn(|_| Self::build_invalid_va_h264_pic_enc());
 
         for (idx, ref_frame) in ref_list_1.iter().enumerate().take(16) {
             ref_pic_list_1[idx] = Self::build_h264_pic(&ref_frame.recon_pic, &ref_frame.meta);
@@ -364,16 +383,8 @@ where
         let coded_buf = self.new_coded_buffer(&request.tunings.rate_control)?;
         let recon = self.new_scratch_picture()?;
 
-        // Use bitrate from RateControl or ask driver to ignore
-        let bits_per_second = request.tunings.rate_control.bitrate_target().unwrap_or(0) as u32;
-        let seq_param = Self::build_enc_seq_param(
-            &request.sps,
-            bits_per_second,
-            request.intra_period,
-            request.ip_period,
-        );
-
         let pic_param = Self::build_enc_pic_param(&request, &coded_buf, &recon);
+        let (nal_ref_idc, nalu_type) = request.slice_nal_header();
         let slice_param = Self::build_enc_slice_param(
             &request.pps,
             &request.header,
@@ -394,11 +405,8 @@ where
         // Clone picture using [`Picture::new_from_same_surface`] to avoid
         // creatig a shared cell picture between its references and processed
         // picture.
-        let mut picture = Picture::new(
-            request.dpb_meta.frame_num as u64,
-            Rc::clone(self.context()),
-            request.input,
-        );
+        let mut picture =
+            Picture::new(request.input_meta.timestamp, Rc::clone(self.context()), request.input);
 
         let rc_param =
             tunings_to_libva_rc::<{ MIN_QP as u32 }, { MAX_QP as u32 }>(&request.tunings)?;
@@ -408,22 +416,73 @@ where
             libva::EncMiscParameterFrameRate::new(request.tunings.framerate, 0),
         ));
 
-        picture.add_buffer(self.context().create_buffer(seq_param)?);
+        // The sequence parameter buffer restates sequence-level state the driver keeps (the GOP
+        // structure, the bit rate, the SPS fields and its timing), so it goes with the SPS, on
+        // the IDR alone, as FFmpeg's `vaapi_encode.c` sends it. No driver takes it as the start
+        // of a sequence (Mesa copies its fields; iHD reruns its sequence setup, without an IDR),
+        // and none needs it between IDRs: a bit rate or frame rate a retune changes reaches the
+        // driver through the rate-control and frame-rate buffers every frame carries.
+        if request.parameter_sets.sps() {
+            // Use bitrate from RateControl or ask driver to ignore
+            let bits_per_second = request.tunings.rate_control.bitrate_target().unwrap_or(0) as u32;
+            let seq_param = Self::build_enc_seq_param(
+                &request.sps,
+                bits_per_second,
+                request.intra_period,
+                request.ip_period,
+            );
+            picture.add_buffer(self.context().create_buffer(seq_param)?);
+        }
         picture.add_buffer(self.context().create_buffer(pic_param)?);
-        picture.add_buffer(self.context().create_buffer(slice_param)?);
         picture.add_buffer(self.context().create_buffer(rc_param)?);
         picture.add_buffer(self.context().create_buffer(framerate_param)?);
+
+        let packed = self.packed_headers() != libva::VA_ENC_PACKED_HEADER_NONE;
+        if packed {
+            debug_assert!(
+                request.coded_output.is_empty(),
+                "packed-header backend: EncoderConfig::emit_parameter_sets must be false"
+            );
+            // The SPS and PPS end byte-aligned (`rbsp_trailing_bits()`); the slice header ends
+            // where the slice data begins, mid-byte.
+            if request.parameter_sets.sps() {
+                self.add_packed_header(&mut picture, EncPackedHeaderType::Sequence, |w| {
+                    Synthesizer::<Sps, _>::synthesize(3, &request.sps, w, true).map(|()| 0)
+                })?;
+            }
+            if request.parameter_sets.pps() {
+                self.add_packed_header(&mut picture, EncPackedHeaderType::Picture, |w| {
+                    Synthesizer::<Pps, _>::synthesize(3, &request.pps, w, true).map(|()| 0)
+                })?;
+            }
+            self.add_packed_header(&mut picture, EncPackedHeaderType::Slice, |w| {
+                Synthesizer::<SliceHeader, _>::synthesize(
+                    nal_ref_idc,
+                    nalu_type,
+                    &request.header,
+                    &request.sps,
+                    &request.pps,
+                    w,
+                    true,
+                )
+            })?;
+        }
+        picture.add_buffer(self.context().create_buffer(slice_param)?);
 
         // Start processing the picture encoding
         let picture = picture.begin().context("picture begin")?;
         let picture = picture.render().context("picture render")?;
         let picture = picture.end().context("picture end")?;
 
-        // HACK: Make sure that slice nalu start code is at least 4 bytes.
-        // TODO: Use packed headers to supply slice header with nalu start code of size 4 and get
-        // rid of this hack.
+        // The coded buffer holds what the driver wrote: with packed headers the whole access
+        // unit, from the SPS and PPS (where carried) to the slice. Without them it holds the
+        // slice alone, behind the predictor's in-band SPS and PPS; a zero byte ahead of it keeps
+        // the access unit's first NAL unit on a 4-byte start code (the zero_byte of H.264 B.1.2)
+        // whichever start code the driver writes.
         let mut coded_output = request.coded_output;
-        coded_output.push(0);
+        if !packed {
+            coded_output.push(0);
+        }
 
         // libva will handle the synchronization of reconstructed surface with implicit fences.
         // Therefore return the reconstructed frame immediately.
@@ -454,12 +513,32 @@ impl<V: VideoFrame> StatelessEncoder<V, VaapiBackend<V::MemDescriptor, Surface<V
 
         let bitrate_control = rate_control_to_va_rc(&config.initial_tunings.rate_control)?;
 
-        let backend =
-            VaapiBackend::new(display, va_profile, fourcc, coded_size, bitrate_control, low_power)?;
+        let entrypoint = if low_power { VAEntrypointEncSliceLP } else { VAEntrypointEncSlice };
+        let packed_headers = query_packed_headers(&display, va_profile, entrypoint);
+
+        let backend = VaapiBackend::new_with_packed_headers(
+            display,
+            va_profile,
+            fourcc,
+            coded_size,
+            bitrate_control,
+            low_power,
+            packed_headers,
+        )?;
+
+        // Who writes the parameter sets is this backend's to decide (module doc): the driver,
+        // from the packed SPS and PPS, where it takes packed headers; the predictor, in band,
+        // where it does not.
+        let mut config = config;
+        config.emit_parameter_sets = packed_headers == libva::VA_ENC_PACKED_HEADER_NONE;
 
         Self::new_h264(backend, config, blocking_mode)
     }
 }
+
+#[cfg(test)]
+#[path = "vaapi_packed_header_tests.rs"]
+mod packed_header_tests;
 
 #[cfg(test)]
 pub(super) mod tests {
@@ -484,6 +563,7 @@ pub(super) mod tests {
     use crate::encoder::simple_encode_loop;
     use crate::encoder::stateless::h264::BackendRequest;
     use crate::encoder::stateless::h264::EncoderConfig;
+    use crate::encoder::stateless::h264::ParameterSets;
     use crate::encoder::stateless::h264::StatelessEncoder;
     use crate::encoder::stateless::BackendPromise;
     use crate::encoder::stateless::StatelessEncoderBackendImport;
@@ -596,6 +676,7 @@ pub(super) mod tests {
             ip_period: 0,
             num_macroblocks: (WIDTH * HEIGHT) as usize / (16 * 16),
             is_idr: true,
+            parameter_sets: ParameterSets::SpsAndPps,
             tunings: Tunings {
                 rate_control: RateControl::ConstantBitrate(30_000),
                 ..Default::default()
